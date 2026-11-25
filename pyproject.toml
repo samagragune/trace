@@ -1,0 +1,57 @@
+[build-system]
+requires = ["hatchling>=1.27"]
+build-backend = "hatchling.build"
+
+[project]
+name = "trace-agent"
+version = "0.1.0"
+description = "Describe what's broken. Trace investigates, fixes your code, and verifies the solution."
+readme = "README.md"
+requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Trace contributors" }]
+keywords = ["debugging", "agent", "cli", "llm", "developer-tools"]
+classifiers = [
+    "Development Status :: 2 - Pre-Alpha",
+    "Environment :: Console",
+    "Intended Audience :: Developers",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Software Development :: Debuggers",
+]
+# Each dependency is justified in docs/DECISIONS.md (ADR-005, ADR-009).
+dependencies = [
+    "pydantic>=2.7,<3",   # validated data models for every interface boundary
+    "typer>=0.12,<1",     # CLI command parsing (spec-mandated)
+    "rich>=13.7",         # terminal rendering (spec-mandated)
+    "tomli-w>=1.0,<2",    # writing config.toml (stdlib tomllib can only read)
+    # Exact pin, upgraded deliberately after review: large dependency tree with frequent
+    # releases and a past supply-chain compromise (1.82.7/1.82.8). Used only in
+    # providers/litellm_adapter.py.
+    "litellm==1.110.3",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+trace = "trace_agent.cli.app:main"
+
+[project.urls]
+Documentation = "https://github.com/trace-agent/trace/tree/main/docs"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/trace_agent"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "-ra --strict-markers"
+filterwarnings = [
+    # Emitted by LiteLLM's own models at import time; not actionable for Trace.
+    "ignore:Item .* is using the `ReadOnly` qualifier:UserWarning",
+]
+markers = ["integration: tests that exercise several modules together"]
