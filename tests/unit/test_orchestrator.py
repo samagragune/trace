@@ -188,7 +188,10 @@ def test_keyboard_interrupt_cancels(repo):
 def test_tools_and_finish_sent_to_model(repo):
     _, provider, _ = run([finish()], repo)
     names = [t.name for t in provider.requests[0].tools]
-    assert names == ["list_files", "read_file", "search_code", FINISH_TOOL_NAME]
+    assert names == [
+        "get_project_info", "list_files", "read_file", "search_code", "parse_stack_trace", "inspect_logs",
+        "record_hypothesis", FINISH_TOOL_NAME,
+    ]
     first_user = provider.requests[0].messages[1].content
     assert "registration crashes" in first_user and "read-only" in first_user
 
@@ -205,6 +208,59 @@ def test_reserved_finish_name():
 
     with pytest.raises(ValueError):
         Orchestrator(ScriptedProvider([]), ToolRegistry([Bad()]))
+
+
+# ---- Phase 3: context, hypotheses, redaction -------------------------------------------------
+
+
+def test_opening_context_is_sent_and_recorded(repo):
+    _, provider, sink = run([finish()], repo)
+    first_user = provider.requests[0].messages[1].content
+    assert "## Project overview (detected by Trace)" in first_user and "Python" in first_user
+    [collected] = sink.of_type(EventType.CONTEXT_COLLECTED)
+    assert collected.payload["languages"] == ["Python"]
+
+
+def test_context_collection_can_be_disabled(repo):
+    _, provider, sink = run([finish()], repo, collect_context=False)
+    assert "Project overview" not in provider.requests[0].messages[1].content
+    assert not sink.of_type(EventType.CONTEXT_COLLECTED)
+
+
+def test_hypotheses_are_recorded_revised_and_reported(repo):
+    from trace_agent.agent.orchestrator import HYPOTHESIS_TOOL_NAME
+    from trace_agent.agent.state import HypothesisStatus
+
+    steps = [
+        tool_call_response(HYPOTHESIS_TOOL_NAME, {"statement": "email missing from form data"}),
+        tool_call_response(HYPOTHESIS_TOOL_NAME, {"statement": "register() lowercases None"}),
+        tool_call_response(HYPOTHESIS_TOOL_NAME, {"id": 2, "status": "rejected", "evidence": ["forms.py:2 indexes first"]}),
+        tool_call_response(HYPOTHESIS_TOOL_NAME, {"id": 1, "status": "supported", "evidence": ["app/forms.py:2"]}),
+        tool_call_response(HYPOTHESIS_TOOL_NAME, {"id": 9, "status": "supported"}),  # bad id -> reported, not raised
+        finish(),
+    ]
+    task, provider, sink = run(steps, repo)
+    assert task.status is TaskStatus.COMPLETED
+    h1, h2 = task.hypotheses
+    assert h1.status is HypothesisStatus.SUPPORTED and h1.evidence == ["app/forms.py:2"]
+    assert h1.history == ["proposed@1", "proposed->supported@4"]
+    assert h2.status is HypothesisStatus.REJECTED
+    assert "no hypothesis #9" in last_tool_output(provider.requests[5])
+    assert len([e for e in sink.of_type(EventType.AGENT_DECISION) if e.payload["decision"] == "hypothesis"]) == 4
+    assert task.actions == []  # built-ins act on task state, not the machine
+
+
+def test_project_secrets_are_redacted_before_reaching_the_model(repo):
+    key = "AIza" + "Q" * 35
+    (repo / "app" / "settings.py").write_text(f"GOOGLE_KEY = '{key}'\n")
+
+    def check(request):
+        out = last_tool_output(request)
+        assert key not in out and "[REDACTED]" in out and "redacted credential-like values" in out
+        return finish()
+
+    task, _, _ = run([tool_call_response("read_file", {"path": "app/settings.py"}), check], repo)
+    assert task.status is TaskStatus.COMPLETED
 
 
 # ---- authorization through the loop -----------------------------------------------------------

@@ -19,6 +19,7 @@ from trace_agent.agent.state import ActionStage, AgentTask
 from trace_agent.core.messages import ToolCall
 from trace_agent.observability.events import EventType
 from trace_agent.safety.permissions import Decision, ExecutionMode, PermissionLevel, decide
+from trace_agent.safety.redaction import Redactor
 from trace_agent.tools.base import ToolContext, ToolResult, ToolStatus
 from trace_agent.tools.registry import ToolError, ToolRegistry
 
@@ -56,11 +57,22 @@ def _preview(text: str, limit: int = 500) -> str:
 
 
 class ToolExecutor:
-    def __init__(self, registry: ToolRegistry, mode: ExecutionMode, approver: Approver, emit: EmitFn) -> None:
+    def __init__(
+        self,
+        registry: ToolRegistry,
+        mode: ExecutionMode,
+        approver: Approver,
+        emit: EmitFn,
+        *,
+        redactor: Redactor | None = None,
+    ) -> None:
         self._registry = registry
         self._mode = mode
         self._approver = approver
         self._emit = emit
+        # Redacts credentials found in the *project* (keys in code, logs...) before tool
+        # output is sent to a cloud model. Patterns only, plus any known secrets.
+        self._redactor = redactor or Redactor()
 
     def execute(self, task: AgentTask, call: ToolCall, context: ToolContext) -> ToolResult:
         self._emit(EventType.TOOL_REQUESTED, {"call_id": call.id, "tool": call.name, "arguments": call.arguments})
@@ -105,7 +117,11 @@ class ToolExecutor:
         except Exception as exc:  # noqa: BLE001 - a crashing tool must not crash the agent
             result = ToolResult.failure(ToolStatus.ERROR, f"tool crashed: {type(exc).__name__}: {exc}")
         duration_ms = (time.perf_counter() - started) * 1000
-        result = result.truncated_to(context.max_output_chars).model_copy(update={"duration_ms": duration_ms})
+        redacted_output = self._redactor.text(result.output)
+        update: dict[str, Any] = {"duration_ms": duration_ms}
+        if redacted_output != result.output:
+            update["output"] = redacted_output + "\n(note: Trace redacted credential-like values from this output)"
+        result = result.model_copy(update=update).truncated_to(context.max_output_chars)
 
         stage = ActionStage.EXECUTED if result.ok else ActionStage.FAILED
         task.advance_action(record.seq, stage, result=result)

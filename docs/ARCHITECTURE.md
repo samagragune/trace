@@ -23,10 +23,11 @@ src/trace_agent/
   safety/         ✅ PermissionLevel, ExecutionMode, decide(), resolve_in_project, sensitive files
                   ✅ redaction (Build 002) · 🔜 command risk classifier, checkpoints (Phase 4)
   tools/          ✅ Tool contract, ToolResult, ToolContext, ToolRegistry
-                  ✅ list_files, read_file, search_code (Build 002) · 🔜 write/exec tools (Phase 4)
+                  ✅ 6 read-only tools (Builds 002-003) · 🔜 write/exec tools (Phase 4)
   agent/          ✅ AgentTask, orchestrator loop, executor, observation, prompts (Build 002)
+                  ✅ builtins: finish_task, record_hypothesis; hypotheses in task state (Build 003)
   observability/  ✅ ExecutionEvent, EventSink, InMemoryEventSink, CompositeSink, RedactingSink
-  context/        🔜 Phase 3 (empty on purpose)
+  context/        ✅ project detection, stack-trace parsing, opening-context selection (Build 003)
   benchmark/      🔜 Phase 5 (empty on purpose)
   cli/            ✅ trace | run | status | history | config ... ; session.py = composition root
 ```

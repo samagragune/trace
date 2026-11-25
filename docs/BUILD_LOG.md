@@ -88,8 +88,63 @@ repeat-warning threshold), both fixed. Raw vendor JSON in error messages, fixed 
 **Deferred.** Keyring store, `trace init` wizard, set-key/remove-key (ADR-014); write and exec tools
 (Phase 4); context engine (Phase 3).
 
-**Known limitations.** In-process tools have no timeout yet (they are bounded by size limits
+**Known limitations (Build 002).** In-process tools have no timeout yet (they are bounded by size limits
 instead). A task's row is written to history when it ends, so a hard crash leaves its events but
 no task row. Message-level Gemini thought signatures on text-only turns are not preserved (only
 tool-call ones). No token budget or context compaction yet: very long investigations will
 eventually hit the context window and stop with an error.
+
+---
+
+## Build 003: Phase 3, project understanding and investigation (2026-11-25)
+
+**Objective.** Start every task oriented (project overview, parsed stack traces, code at the
+failing frames) and give the agent better investigation tools and explicit hypotheses.
+
+**Delivered.**
+- `context/project.py`: detects languages, package managers, frameworks, test framework, the likely
+  test command, test dirs and git status. Data-driven tables; bounded scan (5,000 files).
+- `context/stacktrace.py`: parses Python (including chained exceptions and pytest's short format),
+  JS/Node, Java/Kotlin (with "Caused by"), Go, Rust and Ruby traces. Maps frames to project files,
+  including CI and container paths (suffix matching) and Windows paths, marks library frames, and
+  goes through the safety layer for every lookup.
+- `context/selection.py`: a bounded opening context (overview + traces + up to 3 snippets of
+  5,000 chars total + up to 8 locations of quoted error text). Emits CONTEXT_COLLECTED.
+- Tools: `get_project_info`, `parse_stack_trace`, `inspect_logs` (discovers log files, then shows
+  matching lines with context plus the tail; scans the newest 5 MB); `search_code` gains `context_lines`.
+- The `record_hypothesis` built-in, and `AgentTask.hypotheses` with a status history (shown in the
+  terminal, history and final report).
+- Credential-pattern redaction of **tool output** before it reaches the model (secrets in the user's
+  project are not sent to a cloud provider).
+- Token efficiency: tool schemas compacted (`title` annotations removed), and the prompt asks for
+  batched independent calls and no bookkeeping-only responses.
+
+**Tests.** 216 passed, 1 skipped (the symlink test). New: 11 stack-trace tests (6 languages, CI
+paths, boundary escapes), 13 context and tool tests, and 5 orchestrator tests (opening context,
+hypothesis revision, project-secret redaction).
+
+**Live verification (gemini-3.5-flash-lite, buggy-shop fixture). All 7 runs diagnosed correctly.**
+
+| Run | Input | Steps | Tokens | Note |
+|---|---|---|---|---|
+| Build 002 baseline | quoted error | 9 | 16.8k | |
+| 003, first cut | quoted error | 10 | 30.9k | +1,050 prompt tokens per call; 2 bookkeeping-only calls |
+| 003, compact schemas + batching | quoted error | 8 / 6 | 23.6k / 18.0k | batching seen; propose-then-support ceremony remained |
+| 003, final prompt | quoted error | 4 / 7 | 12.1k / 20.7k | ceremony gone; batching inconsistent |
+| 003, final prompt | pasted pytest output | 8 | 26.0k | trace parsed live (Windows paths); never needed to read checkout.py |
+
+**Honest efficiency verdict.** On this 5-file fixture, the opening context did *not* reliably cut
+cost. Orientation was already cheap, and the variance is dominated by whether the model batches
+calls (4 to 8 steps with an identical prompt and model). The token analysis found and fixed two real
+regressions (schema overhead and bookkeeping calls). The context engine's expected value is in
+large repositories and stack-trace-heavy reports, which this fixture can't show. With n ≤ 2 per
+configuration these numbers are anecdotes; the Phase 5 benchmark harness is required to make
+efficiency claims.
+
+**Bug found live and fixed:** Rich swallowed `[supported]` in "Hypotheses considered" (it treated
+it as a markup tag).
+
+**Known limitations.** No context-window management yet (still the main scaling risk). Snippet and
+message-hit selection is lexical, not semantic. Monorepo detection only covers the root (or a
+directory passed to `get_project_info`). The model still sometimes re-reads files after it has
+enough evidence.

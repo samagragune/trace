@@ -34,6 +34,25 @@ def test_malformed_messages_rejected(kwargs):
         Message(**kwargs)
 
 
+def test_compact_json_schema_drops_title_annotations_only():
+    from trace_agent.core.messages import compact_json_schema
+
+    schema = {
+        "title": "Input",
+        "type": "object",
+        "properties": {
+            "title": {"title": "Title", "type": "string"},  # a real parameter named "title" survives
+            "tags": {"title": "Tags", "type": "array", "items": {"title": "Tag", "type": "string"}},
+        },
+        "required": ["title"],
+    }
+    assert compact_json_schema(schema) == {
+        "type": "object",
+        "properties": {"title": {"type": "string"}, "tags": {"type": "array", "items": {"type": "string"}}},
+        "required": ["title"],
+    }
+
+
 def test_tool_definition_requires_object_schema():
     ToolDefinition(name="read_file", description="d", parameters={"type": "object"})
     with pytest.raises(ValidationError):

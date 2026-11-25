@@ -4,6 +4,23 @@
 `agent/observation.py`). With only read-only tools available, the best possible outcome today is a
 *diagnosis*; fixes come with the write tools in Phase 4.
 
+## Observe first: the opening context (Build 003)
+
+Before the first model call, `context.selection.build_task_context` adds to the task message:
+- a project overview,
+- stack traces parsed from the user's report, mapped to project files,
+- code around the innermost project frames,
+- the project locations of quoted error text.
+
+It is bounded (ADR-015), recorded as a CONTEXT_COLLECTED event, and can be turned off with
+`OrchestratorSettings(collect_context=False)`.
+
+## Hypotheses (Build 003)
+
+`record_hypothesis` creates hypothesis #N or updates it (`id`) to supported or rejected with
+evidence. Each transition is stored (`proposed@1`, `proposed->rejected@4`) and shown in the terminal,
+the history and the final report.
+
 ## Ending a task: the `finish_task` tool
 
 The model ends a task only by calling the built-in `finish_task` tool, with `outcome`, `summary`,

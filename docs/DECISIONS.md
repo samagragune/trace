@@ -122,6 +122,37 @@ The user asked to go to Phase 2 directly. Build 002 includes the parts of Phase 
 depends on (the model adapter and `trace config test`). The keyring store, the `trace init` wizard
 and `set-key`/`remove-key` are deferred; keys come from environment variables until then.
 
+## ADR-015: Context is collected up front, deterministically and within a budget (Accepted, Build 003)
+
+The spec's loop has an Observe step before Reason. Trace runs it without a model: detection tables,
+regex trace parsers and an exact-text grep. These are fast, free and reproducible, which matters for
+benchmarks. Hard budgets (3 snippets, 5,000 chars, 8 hits, a 5,000-file scan) honour "do not load
+the entire repository". **Rejected:** embeddings or a vector index (heavy, non-deterministic, not
+needed at this scale; the spec's Phase 0 "do not build yet" list includes vector databases).
+Context failures never block a task: they are logged as an ERROR event and the task proceeds
+without the extra context.
+
+## ADR-016: Hypotheses are a built-in tool and part of task state (Accepted, Build 003)
+
+The spec requires hypothesis formation and revision, and inspectable decisions without hidden
+chain-of-thought. `record_hypothesis` captures them as structured data (statement, status,
+evidence, transition history) that the terminal, history and benchmarks can use. Like
+`finish_task`, it acts only on task state, so it bypasses the executor and needs no authorization.
+It is optional for the model. The cost risk (bookkeeping-only round trips) was measured live and
+addressed in the prompt.
+
+## ADR-017: Tool output is redacted before it is sent to the model (Accepted, Build 003)
+
+Project files and logs can contain credentials. Pattern-based redaction (Google, Groq, OpenRouter,
+`sk-`, GitHub, AWS, PEM, bearer tokens) is applied to every tool's output, and the model is told
+when it happens. Trade-off: a bug *about* a hardcoded key is still diagnosable (the model sees
+`[REDACTED]` at the right location), and a deliberate test value that looks like a key gets hidden.
+
+## ADR-018: The circular import is broken with `context/ignore.py` (Accepted, Build 003)
+
+`tools` needs the ignore list and `context` is used by tools. The shared list now lives in a
+dependency-free module, so neither package imports the other's internals.
+
 ---
 
 ## Open proposals (need your decision)

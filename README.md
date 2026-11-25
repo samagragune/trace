@@ -5,8 +5,9 @@
 Trace is an open-source, locally executing debugging agent. It runs on your machine and uses the
 model provider you choose with your own key (BYOK). There is no Trace account and no Trace server.
 
-**Status: v0.1.0, Phase 2 (agent loop).** Trace can investigate a bug with read-only tools and
-report a diagnosis (root cause, evidence, recommended fix). It cannot edit files yet (Phase 4).
+**Status: v0.1.0, Phase 3 (project understanding).** Trace can investigate a bug with read-only tools and
+report a diagnosis (root cause, evidence, recommended fix). It detects the project, parses stack
+traces in 6 languages and reads logs. It cannot edit files yet (Phase 4).
 See [docs/BUILD_LOG.md](docs/BUILD_LOG.md).
 
 ```bash

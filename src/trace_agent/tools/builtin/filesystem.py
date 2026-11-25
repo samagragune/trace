@@ -17,18 +17,10 @@ from pathlib import Path
 
 from pydantic import Field
 
+from trace_agent.context.ignore import DEFAULT_EXCLUDED_DIRS, is_excluded_dir  # noqa: F401 (re-export)
 from trace_agent.safety.paths import UnsafePathError, is_sensitive_path, resolve_in_project
 from trace_agent.safety.permissions import PermissionLevel
 from trace_agent.tools.base import Tool, ToolContext, ToolInput, ToolResult, ToolStatus
-
-#: Directories never worth showing a model. Users can't opt back in yet (Phase 3: .traceignore).
-DEFAULT_EXCLUDED_DIRS = frozenset(
-    {
-        ".git", ".hg", ".svn", ".venv", "venv", "env", "__pycache__", "node_modules", ".mypy_cache",
-        ".pytest_cache", ".ruff_cache", ".tox", ".nox", "dist", "build", ".next", ".idea", ".vscode",
-        "target", ".gradle", ".eggs", "site-packages", ".cache", "coverage", "htmlcov",
-    }
-)
 
 MAX_LIST_ENTRIES = 500
 MAX_READ_BYTES = 1_000_000
@@ -41,7 +33,7 @@ def _relative(root: Path, path: Path) -> str:
 
 
 def _is_excluded_dir(name: str, extra: list[str]) -> bool:
-    return name in DEFAULT_EXCLUDED_DIRS or name.endswith(".egg-info") or any(fnmatch.fnmatch(name, p) for p in extra)
+    return is_excluded_dir(name, extra)
 
 
 def _walk_files(root: Path, start: Path, exclude: list[str]) -> Iterator[Path]:
@@ -173,6 +165,7 @@ class SearchCodeInput(ToolInput):
     file_pattern: str | None = Field(default=None, description="Glob for file names, e.g. '*.py'.")
     regex: bool = Field(default=False, description="Treat query as a regular expression.")
     case_sensitive: bool = Field(default=False)
+    context_lines: int = Field(default=0, ge=0, le=5, description="Lines of surrounding code to show per match.")
 
 
 class SearchCodeTool(Tool):
@@ -215,10 +208,23 @@ class SearchCodeTool(Tool):
             if _looks_binary(raw[:8192]):
                 continue
             found = False
-            for number, line in enumerate(raw.decode("utf-8", errors="replace").splitlines(), start=1):
+            rel = _relative(root, path)
+            file_lines = raw.decode("utf-8", errors="replace").splitlines()
+            shown_until = 0  # last line number already printed for this file (avoids overlapping context)
+            for number, line in enumerate(file_lines, start=1):
                 if pattern.search(line):
                     found = True
-                    matches.append(f"{_relative(root, path)}:{number}: {line.strip()[:300]}")
+                    if args.context_lines:
+                        start = max(1, number - args.context_lines, shown_until + 1)
+                        end = min(len(file_lines), number + args.context_lines)
+                        if shown_until and start > shown_until + 1:
+                            matches.append("--")
+                        for n in range(start, end + 1):
+                            sep = ":" if pattern.search(file_lines[n - 1]) else "-"
+                            matches.append(f"{rel}{sep}{n}{sep} {file_lines[n - 1].rstrip()[:300]}")
+                        shown_until = end
+                    else:
+                        matches.append(f"{rel}:{number}: {line.strip()[:300]}")
                     if len(matches) >= MAX_SEARCH_MATCHES:
                         truncated = True
                         break

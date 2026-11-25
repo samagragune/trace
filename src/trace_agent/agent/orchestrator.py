@@ -5,73 +5,54 @@ each requested action through the ToolExecutor (validation + authorization + exe
 feeds back what actually happened, and enforces limits. The order of investigation comes
 entirely from the model's decisions.
 
-Ending a task requires the model to call the built-in ``finish_task`` tool. Its claimed
-outcome is checked: "fixed" is only accepted if ``AgentTask`` confirms a verified
-modification, otherwise the claim is rejected and the model is told why.
+Observe (step 2 of the spec's loop) happens up front: ``context.selection`` builds a
+bounded opening context (project overview, parsed stack traces, code at the failing
+frames, locations of quoted error text) so the model starts oriented instead of
+spending its first iterations on discovery.
+
+Built-in tools act on task state rather than the machine (``agent.builtins``):
+``record_hypothesis`` makes reasoning inspectable; ``finish_task`` ends the task, and
+its claimed outcome is checked ("fixed" requires a verified modification).
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import ValidationError
 
+from trace_agent.agent.builtins import (
+    BUILTIN_TOOL_NAMES,
+    BUILTIN_TOOLS,
+    FINISH_TOOL,
+    FINISH_TOOL_NAME,
+    HYPOTHESIS_TOOL_NAME,
+    OUTCOME_REASON,
+    FinishInput,
+    HypothesisInput,
+    Outcome,
+)
 from trace_agent.agent.executor import Approver, DenyAllApprover, ToolExecutor
 from trace_agent.agent.observation import ProgressMonitor, render_tool_result, repeat_warning
 from trace_agent.agent.prompts import DEFAULT_SYSTEM_PROMPT, build_task_message
-from trace_agent.agent.state import AgentTask, StopReason
+from trace_agent.agent.state import AgentTask, StopReason, TaskStateError
 from trace_agent.core.messages import Message, ToolCall, ToolDefinition
 from trace_agent.observability.events import EventSink, EventType, ExecutionEvent, InMemoryEventSink
 from trace_agent.providers.base import CompletionRequest, ModelProvider
 from trace_agent.providers.errors import ProviderError
 from trace_agent.safety.permissions import DEFAULT_EXECUTION_MODE, ExecutionMode
+from trace_agent.safety.redaction import Redactor
 from trace_agent.tools.base import ToolContext
 from trace_agent.tools.registry import ToolRegistry
 
-FINISH_TOOL_NAME = "finish_task"
+# Re-exported for callers/tests that import them from here.
+__all__ = ["FINISH_TOOL", "FINISH_TOOL_NAME", "HYPOTHESIS_TOOL_NAME", "Orchestrator", "OrchestratorSettings", "Outcome"]
 
 IDLE_NUDGE = (
     "Trace: your last reply contained no tool call. Continue investigating with the tools, "
     f"or call {FINISH_TOOL_NAME} to end the task."
-)
-
-
-class Outcome(StrEnum):
-    FIXED = "fixed"
-    DIAGNOSED = "diagnosed"
-    NO_FIX_NEEDED = "no_fix_needed"
-    INSUFFICIENT_INFORMATION = "insufficient_information"
-
-
-_OUTCOME_REASON = {
-    Outcome.FIXED: StopReason.VERIFIED_FIX,
-    Outcome.DIAGNOSED: StopReason.DIAGNOSED,
-    Outcome.NO_FIX_NEEDED: StopReason.NO_FIX_NEEDED,
-    Outcome.INSUFFICIENT_INFORMATION: StopReason.INSUFFICIENT_INFORMATION,
-}
-
-
-class FinishInput(BaseModel):
-    model_config = ConfigDict(extra="ignore")  # tolerate extra keys from chatty models
-
-    outcome: Outcome
-    summary: str = Field(min_length=1, description="One-paragraph explanation for the user.")
-    root_cause: str | None = Field(default=None, description="The identified root cause, if any.")
-    evidence: list[str] = Field(default_factory=list, description="Observed facts, e.g. 'src/a.py:42 uses x before init'.")
-    recommended_fix: str | None = Field(default=None, description="Concrete change that would fix the problem.")
-    confidence: str = Field(default="medium", pattern="^(low|medium|high)$")
-
-
-FINISH_TOOL = ToolDefinition(
-    name=FINISH_TOOL_NAME,
-    description=(
-        "End the task and report the result to the user. Call it alone (not together with other tools). "
-        "outcome must be one of: fixed, diagnosed, no_fix_needed, insufficient_information."
-    ),
-    parameters=FinishInput.model_json_schema(),
 )
 
 
@@ -84,6 +65,7 @@ class OrchestratorSettings:
     temperature: float | None = None
     max_repeated_calls: int = 4
     max_idle_responses: int = 2
+    collect_context: bool = True
 
 
 class Orchestrator:
@@ -96,15 +78,18 @@ class Orchestrator:
         sink: EventSink | None = None,
         approver: Approver | None = None,
         system_prompt: str = DEFAULT_SYSTEM_PROMPT,
+        redactor: Redactor | None = None,
     ) -> None:
-        if FINISH_TOOL_NAME in registry:
-            raise ValueError(f"'{FINISH_TOOL_NAME}' is reserved for the orchestrator")
+        reserved = BUILTIN_TOOL_NAMES & set(registry.names())
+        if reserved:
+            raise ValueError(f"tool names reserved for the orchestrator: {', '.join(sorted(reserved))}")
         self.provider = provider
         self.registry = registry
         self.settings = settings
         self.sink = sink or InMemoryEventSink()
         self.approver = approver or DenyAllApprover()
         self.system_prompt = system_prompt
+        self.redactor = redactor or Redactor()
 
     # ------------------------------------------------------------------ public API
 
@@ -118,13 +103,11 @@ class Orchestrator:
             timeout_seconds=self.settings.tool_timeout_seconds,
             max_output_chars=self.settings.max_output_chars,
         )
-        executor = ToolExecutor(self.registry, self.settings.mode, self.approver, emit)
+        executor = ToolExecutor(self.registry, self.settings.mode, self.approver, emit, redactor=self.redactor)
         monitor = ProgressMonitor(stop_after=self.settings.max_repeated_calls, max_idle=self.settings.max_idle_responses)
-        tools = (*self.registry.definitions(context), FINISH_TOOL)
-        messages: list[Message] = [
-            Message.system(self.system_prompt),
-            Message.user(build_task_message(description, root, self.settings.mode, [t.name for t in tools])),
-        ]
+        tools = (*self.registry.definitions(context), *BUILTIN_TOOLS)
+        tool_names = [t.name for t in tools]
+
         emit(
             EventType.TASK_STARTED,
             {
@@ -133,9 +116,12 @@ class Orchestrator:
                 "mode": self.settings.mode.value,
                 "provider": self.provider.provider_id,
                 "model": self.provider.model,
-                "tools": [t.name for t in tools],
+                "tools": tool_names,
             },
         )
+        task_message = build_task_message(description, root, self.settings.mode, tool_names)
+        task_message += self._opening_context(description, root, emit)
+        messages: list[Message] = [Message.system(self.system_prompt), Message.user(task_message)]
 
         try:
             self._loop(task, messages, tools, context, executor, monitor, emit)
@@ -154,9 +140,26 @@ class Orchestrator:
                 "model_calls": task.model_calls,
                 "prompt_tokens": task.prompt_tokens,
                 "completion_tokens": task.completion_tokens,
+                "hypotheses": [h.model_dump(mode="json") for h in task.hypotheses],
             },
         )
         return task
+
+    # ------------------------------------------------------------------ observe (up front)
+
+    def _opening_context(self, description: str, root: Path, emit: Any) -> str:
+        if not self.settings.collect_context:
+            return ""
+        from trace_agent.context.selection import build_task_context  # lazy: filesystem scan
+
+        try:
+            selected = build_task_context(description, root)
+        except Exception as exc:  # noqa: BLE001 - context is an optimization; never block the task on it
+            emit(EventType.ERROR, {"source": "context", "type": type(exc).__name__, "message": str(exc)})
+            return ""
+        emit(EventType.CONTEXT_COLLECTED, selected.summary())
+        rendered = self.redactor.text(selected.render())
+        return f"\n\n{rendered}"
 
     # ------------------------------------------------------------------ the loop
 
@@ -216,13 +219,15 @@ class Orchestrator:
             monitor.record_activity()
 
             finish_calls = [c for c in response.tool_calls if c.name == FINISH_TOOL_NAME]
-            action_calls = [c for c in response.tool_calls if c.name != FINISH_TOOL_NAME]
+            other_calls = [c for c in response.tool_calls if c.name != FINISH_TOOL_NAME]
 
             # Act + observe -------------------------------------------------------------
-            for call in action_calls:
+            for call in other_calls:
                 count = monitor.record_call(call)
-                result = executor.execute(task, call, context)
-                content = render_tool_result(result)
+                if call.name == HYPOTHESIS_TOOL_NAME:
+                    content = self._record_hypothesis(task, call, emit)
+                else:
+                    content = render_tool_result(executor.execute(task, call, context))
                 if monitor.should_warn(count):
                     content += repeat_warning(count)
                 messages.append(Message.tool_result(call.id, content))
@@ -236,9 +241,9 @@ class Orchestrator:
 
             # Evaluate -----------------------------------------------------------------
             for index, call in enumerate(finish_calls):
-                if index == 0 and not action_calls and self._try_finish(task, call, messages, emit):
+                if index == 0 and not other_calls and self._try_finish(task, call, messages, emit):
                     return
-                if index > 0 or action_calls:
+                if index > 0 or other_calls:
                     messages.append(
                         Message.tool_result(
                             call.id,
@@ -246,6 +251,25 @@ class Orchestrator:
                             "results of your other tool calls.",
                         )
                     )
+
+    # ------------------------------------------------------------------ built-ins
+
+    def _record_hypothesis(self, task: AgentTask, call: ToolCall, emit: Any) -> str:
+        if call.arguments_error:
+            return f"status: invalid_input\nerror: arguments were not valid JSON ({call.arguments_error})"
+        try:
+            args = HypothesisInput.model_validate(call.arguments)
+            hypothesis = task.record_hypothesis(args.statement, args.status, args.evidence, args.id)
+        except ValidationError as exc:
+            problems = "; ".join(f"{'.'.join(map(str, e['loc']))}: {e['msg']}" for e in exc.errors())
+            return f"status: invalid_input\nerror: {problems}"
+        except TaskStateError as exc:
+            return f"status: invalid_input\nerror: {exc}"
+        emit(EventType.AGENT_DECISION, {"decision": "hypothesis", **hypothesis.model_dump(mode="json")})
+        return (
+            f"status: success\noutput: hypothesis #{hypothesis.id} is now {hypothesis.status.value} "
+            f"({len(hypothesis.evidence)} evidence items)"
+        )
 
     def _try_finish(self, task: AgentTask, call: ToolCall, messages: list[Message], emit: Any) -> bool:
         def reject(reason: str) -> bool:
@@ -269,7 +293,7 @@ class Orchestrator:
 
         emit(EventType.AGENT_DECISION, {"decision": "finish", **report.model_dump(mode="json")})
         task.report = report.model_dump(mode="json")
-        task.finish(_OUTCOME_REASON[report.outcome], report.summary)
+        task.finish(OUTCOME_REASON[report.outcome], report.summary)
         return True
 
     # ------------------------------------------------------------------ events

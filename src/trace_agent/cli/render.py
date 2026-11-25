@@ -61,6 +61,21 @@ class ConsoleEventPrinter:
                     c.print(f"    [red]{p['status']}:[/red] {escape(p.get('error') or '')}", soft_wrap=True)
                 if self.verbose and p.get("output_preview"):
                     c.print(f"[dim]{escape(p['output_preview'])}[/dim]", soft_wrap=True)
+            case EventType.CONTEXT_COLLECTED:
+                bits = [", ".join(p.get("languages") or []) or "unknown language"]
+                if p.get("test_command"):
+                    bits.append(f"tests: {p['test_command']}")
+                if p.get("traces"):
+                    bits.append(f"{len(p['traces'])} stack trace(s), {len(p.get('project_frames') or [])} project frames")
+                if p.get("message_hits"):
+                    bits.append(f"error text found at {', '.join(p['message_hits'][:3])}")
+                c.print(f"[dim]Context: {escape(' | '.join(bits))}[/dim]", soft_wrap=True)
+            case EventType.AGENT_DECISION if p.get("decision") == "hypothesis":
+                style = {"supported": "green", "rejected": "red"}.get(p["status"], "blue")
+                c.print(
+                    f"  [{style}]hypothesis #{p['id']} {p['status']}:[/{style}] {escape(_first_line(p['statement'], 200))}",
+                    soft_wrap=True,
+                )
             case EventType.AGENT_DECISION if p.get("decision") == "finish_rejected":
                 c.print(f"  [magenta]finish rejected:[/magenta] {escape(p['reason'])}", soft_wrap=True)
             case EventType.ERROR:
@@ -105,6 +120,10 @@ def render_final_report(console: Console, task: AgentTask) -> None:
         lines += ["", "[bold]Recommended fix[/bold]", escape(report["recommended_fix"])]
     if report.get("confidence"):
         lines += ["", f"[bold]Confidence:[/bold] {report['confidence']}"]
+    if task.hypotheses:
+        lines += ["", "[bold]Hypotheses considered[/bold]"]
+        for h in task.hypotheses:
+            lines.append(escape(f"#{h.id} [{h.status.value}] {_first_line(h.statement, 200)}"))
     tokens = task.prompt_tokens + task.completion_tokens
     lines += [
         "",

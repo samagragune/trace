@@ -54,6 +54,9 @@ Actions the policy marks ASK prompt in the terminal (default: **no**). When stdi
 terminal (CI, pipes), every ASK becomes a denial (`DenyAllApprover`). Denials are reported to the
 model as `status: denied` so it can change approach.
 
+### Project secrets are not sent to the model (Build 003)
+Tool output is redacted for credential patterns before it reaches the model, which is told when that happens (ADR-017). The opening context is redacted too, and never reads sensitive files.
+
 ### Read-only agent
 Build 002's tools are read-only. `read_file` refuses sensitive files, `search_code` skips them, and
 both enforce the project boundary.

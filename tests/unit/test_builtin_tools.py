@@ -27,7 +27,9 @@ def ctx(repo):
 
 def test_default_registry_is_read_only():
     reg = default_registry()
-    assert reg.names() == ["list_files", "read_file", "search_code"]
+    assert reg.names() == [
+        "get_project_info", "list_files", "read_file", "search_code", "parse_stack_trace", "inspect_logs"
+    ]
     assert {reg.get(n).permission.value for n in reg.names()} == {"read"}
 
 
@@ -71,6 +73,15 @@ def test_search_finds_matches_and_skips_secrets_and_deps(ctx):
     assert "app/forms.py:1:" in r.output and "app/views.py:1:" in r.output
     assert ".env" not in r.output and "node_modules" not in r.output
     assert r.data["files"] == 2
+
+
+def test_search_with_context_lines(ctx):
+    r = SearchCodeTool().run(SearchCodeInput(query="email = ", context_lines=1), ctx)
+    assert r.output.splitlines() == [
+        "app/forms.py-1- def register(data):",
+        "app/forms.py:2:     email = data['email']",
+        "app/forms.py-3-     return email.lower()",
+    ]
 
 
 def test_search_regex_and_pattern(ctx):

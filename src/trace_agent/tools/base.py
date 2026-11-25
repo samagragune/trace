@@ -23,7 +23,7 @@ from typing import Any, ClassVar
 
 from pydantic import BaseModel, ConfigDict, Field, model_validator
 
-from trace_agent.core.messages import ToolDefinition
+from trace_agent.core.messages import ToolDefinition, compact_json_schema
 from trace_agent.safety.permissions import PermissionLevel
 
 TRUNCATION_MARKER = "\n... [{omitted} characters omitted by Trace] ...\n"
@@ -126,7 +126,7 @@ class Tool(ABC):
         return ToolDefinition(
             name=self.name,
             description=self.description,
-            parameters=self.input_model.model_json_schema(),
+            parameters=compact_json_schema(self.input_model.model_json_schema()),
         )
 
     def is_available(self, context: ToolContext) -> bool:

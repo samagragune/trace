@@ -131,6 +131,26 @@ class VerificationResult(BaseModel):
     recorded_at: datetime = Field(default_factory=_now)
 
 
+class HypothesisStatus(StrEnum):
+    PROPOSED = "proposed"
+    SUPPORTED = "supported"
+    REJECTED = "rejected"
+
+
+class Hypothesis(BaseModel):
+    """A root-cause hypothesis the agent formed, with the evidence it cites and its current status."""
+
+    model_config = ConfigDict(validate_assignment=True)
+
+    id: int = Field(ge=1)
+    statement: str = Field(min_length=1)
+    status: HypothesisStatus = HypothesisStatus.PROPOSED
+    evidence: list[str] = Field(default_factory=list)
+    created_iteration: int = Field(ge=0)
+    updated_iteration: int = Field(ge=0)
+    history: list[str] = Field(default_factory=list, description="Status transitions, e.g. 'proposed->rejected@4'.")
+
+
 class AgentTask(BaseModel):
     model_config = ConfigDict(validate_assignment=True)
 
@@ -142,6 +162,7 @@ class AgentTask(BaseModel):
     iteration: int = Field(default=0, ge=0)
     actions: list[ActionRecord] = Field(default_factory=list)
     verifications: list[VerificationResult] = Field(default_factory=list)
+    hypotheses: list[Hypothesis] = Field(default_factory=list)
     stop_reason: StopReason | None = None
     summary: str | None = None
     report: dict[str, Any] | None = Field(
@@ -214,6 +235,43 @@ class AgentTask(BaseModel):
         if not 1 <= seq <= len(self.actions):
             raise TaskStateError(f"no action with seq {seq}")
         return self.actions[seq - 1]
+
+    # ---- hypotheses ------------------------------------------------------
+
+    def record_hypothesis(
+        self,
+        statement: str | None,
+        status: HypothesisStatus,
+        evidence: list[str],
+        hypothesis_id: int | None = None,
+    ) -> Hypothesis:
+        """Create a hypothesis, or update one by id (status change, more evidence, refined statement)."""
+        self._require_running()
+        if hypothesis_id is None:
+            if not statement or not statement.strip():
+                raise TaskStateError("a new hypothesis needs a statement")
+            hypothesis = Hypothesis(
+                id=len(self.hypotheses) + 1,
+                statement=statement.strip(),
+                status=status,
+                evidence=list(evidence),
+                created_iteration=self.iteration,
+                updated_iteration=self.iteration,
+                history=[f"{status.value}@{self.iteration}"],
+            )
+            self.hypotheses.append(hypothesis)
+            return hypothesis
+        if not 1 <= hypothesis_id <= len(self.hypotheses):
+            raise TaskStateError(f"no hypothesis #{hypothesis_id}; existing ids: 1..{len(self.hypotheses)}")
+        hypothesis = self.hypotheses[hypothesis_id - 1]
+        if statement and statement.strip():
+            hypothesis.statement = statement.strip()
+        if status is not hypothesis.status:
+            hypothesis.history = [*hypothesis.history, f"{hypothesis.status.value}->{status.value}@{self.iteration}"]
+            hypothesis.status = status
+        hypothesis.evidence = [*hypothesis.evidence, *[e for e in evidence if e not in hypothesis.evidence]]
+        hypothesis.updated_iteration = self.iteration
+        return hypothesis
 
     # ---- verification ----------------------------------------------------
 

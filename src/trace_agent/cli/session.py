@@ -84,6 +84,7 @@ def run_task(
         sink=sink,
         approver=approver,
         system_prompt=load_system_prompt(agent_cfg.system_prompt_file),
+        redactor=redactor,
     )
     task = orchestrator.run(description, options.project_root)
     history.save_task(task, provider=provider.provider_id, model=provider.model, mode=mode.value)

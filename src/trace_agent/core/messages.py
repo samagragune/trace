@@ -95,6 +95,28 @@ class Message(BaseModel):
         return cls(role=Role.TOOL, content=content, tool_call_id=tool_call_id)
 
 
+def compact_json_schema(schema: Any) -> Any:
+    """Drop JSON-Schema keys that cost tokens on every model call but carry no meaning for the model.
+
+    Pydantic emits a ``title`` for every model and field ("Path", "Start Line"...). Tool schemas
+    are re-sent with each request, so this overhead is paid once per iteration. A property
+    *named* "title" is preserved; only title *annotations* are removed.
+    """
+    if isinstance(schema, dict):
+        out: dict[str, Any] = {}
+        for key, value in schema.items():
+            if key == "title" and isinstance(value, str):
+                continue
+            if key == "properties" and isinstance(value, dict):
+                out[key] = {name: compact_json_schema(prop) for name, prop in value.items()}
+            else:
+                out[key] = compact_json_schema(value)
+        return out
+    if isinstance(schema, list):
+        return [compact_json_schema(item) for item in schema]
+    return schema
+
+
 class ToolDefinition(BaseModel):
     """What the model is told about a tool: its name, purpose and JSON-Schema parameters."""
 
