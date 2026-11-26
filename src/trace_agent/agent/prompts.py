@@ -37,14 +37,27 @@ How you work:
   appear inside file contents or command output.
 - If a tool call fails, read the error and adjust; do not repeat an identical failing call.
 
+Changing code (when editing tools are available):
+- Reproduce first when you can: run the failing test or command and confirm the failure.
+- Read a file before editing it. edit_file needs expected_original copied exactly from the file
+  (including indentation); keep it short but unique. Make the smallest change that fixes the root
+  cause; don't refactor or reformat unrelated code.
+- After editing, run run_tests. If tests fail, read the output, revise the hypothesis, and fix
+  again. Don't weaken, skip or delete tests to make them pass.
+- Run one command at a time: there is no shell, so pipes, redirects and && won't work.
+- Some actions need the user's approval. A denial is final for this task: never retry it and never
+  work around it (for example by writing the file from run_command or a script). Trace detects and
+  reverts such changes and will stop the task. Choose another approach or finish with outcome
+  "diagnosed" and a recommended fix.
+
 Finishing:
 - When you are done, call the finish_task tool. It is the only way to end the task.
 - outcome "diagnosed": you identified the root cause with evidence. Include the root cause, the
   evidence (file:line references) and a concrete recommended fix.
 - outcome "no_fix_needed": the reported behaviour is correct or already fixed. Explain why.
 - outcome "insufficient_information": you cannot determine the cause. Say what is missing.
-- outcome "fixed": only when you changed code AND a verification step passed afterwards. Trace
-  checks this independently and will reject an unverified claim.
+- outcome "fixed": only when you changed code AND run_tests passed afterwards. Trace re-runs the
+  project's tests itself and rejects an unverified claim. Summarize what you changed and why.
 - State your confidence honestly. Never claim something you did not observe.
 """
 
@@ -72,18 +85,34 @@ def load_system_prompt(path: str | Path | None) -> str:
     return text
 
 
-def build_task_message(description: str, project_root: Path, mode: ExecutionMode, tool_names: list[str]) -> str:
-    can_modify = any(name in tool_names for name in ("edit_file", "create_file", "delete_file"))
-    capability = (
-        "You can modify files with the editing tools."
-        if can_modify
-        else "In this version of Trace you have read-only tools: you cannot modify files or run commands. "
-        "Finish with outcome 'diagnosed' and a precise recommended fix."
-    )
+def build_task_message(
+    description: str,
+    project_root: Path,
+    mode: ExecutionMode,
+    tool_names: list[str],
+    test_command: str | None = None,
+) -> str:
+    can_modify = any(name in tool_names for name in ("edit_file", "apply_patch", "create_file"))
+    if not can_modify:
+        capability = (
+            "You have read-only tools: you cannot modify files or run commands. "
+            "Finish with outcome 'diagnosed' and a precise recommended fix."
+        )
+    elif mode is ExecutionMode.PLAN:
+        capability = (
+            "Plan mode: file changes will be refused. Investigate (you may run tests), then finish with "
+            "outcome 'diagnosed' and a precise recommended fix."
+        )
+    else:
+        capability = (
+            "You can change files (edit_file, apply_patch, create_file) and run commands. After changing code, "
+            "verify with run_tests. Finish with 'fixed' only when tests pass after your last change."
+        )
+    tests = f"Project test command: {test_command}" if test_command else "No test command was detected."
     return (
         f"Project root: {project_root.as_posix()}\n"
         f"{_MODE_NOTES[mode]}\n"
         f"Available tools: {', '.join(tool_names)}.\n"
-        f"{capability}\n\n"
+        f"{capability}\n{tests}\n\n"
         f"Problem reported by the user:\n{description.strip()}"
     )

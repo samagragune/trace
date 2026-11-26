@@ -1,6 +1,6 @@
 # Architecture
 
-**Version:** 0.1.0 · **Implemented through:** Build 003 (Phase 3) · **Last updated:** 2026-11-25
+**Version:** 0.1.0 · **Implemented through:** Build 004 (Phase 4) · **Last updated:** 2026-11-26
 
 Legend: ✅ implemented · 🟡 partially implemented · 🔜 planned (phase noted) · ⚠️ known gap
 
@@ -19,7 +19,10 @@ model proposes goes through the **ToolExecutor**: validated against a schema, au
 **safety layer** (policy plus, when needed, the user), executed, size-bounded and **redacted**. Only
 then is the actual result fed back to the model. The **task state** records every action through
 explicit stages, tracks hypotheses, and refuses to call a task "fixed" without a verified
-modification. Everything the orchestrator touches is an interface, so providers, tools, sinks and
+modification. Since Build 004 the agent can change code: every change is backed up first
+(undoable), files holding the user's uncommitted work need explicit approval, commands run without a
+shell inside a **write guard** that makes denials binding, and a "fixed" claim is accepted only
+after Trace re-runs the project's tests itself. Everything the orchestrator touches is an interface, so providers, tools, sinks and
 storage can change without changing the loop.
 
 ---
@@ -32,7 +35,7 @@ storage can change without changing the loop.
 | 1 | CLI and configuration | 🟡 partial: adapter, `config test` and CLI done; keyring, `trace init` and set-key deferred (ADR-014) | 001, 002 | `18c4240` |
 | 2 | Agent brain and recursive loop | ✅ complete (read-only tools, ADR-013) | 002 | `18c4240` |
 | 3 | Project understanding and investigation | ✅ complete | 003 | `af0f4aa` |
-| 4 | Code editing and execution | 🔜 next | — | — |
+| 4 | Code editing and execution | ✅ complete | 004 | pushed 2026-11-26 (see `git log`) |
 | 5 | Benchmark infrastructure | 🔜 | — | — |
 | 6 | Hardening and public release | 🔜 | — | — |
 
@@ -115,6 +118,33 @@ honestly:** the first cut regressed to 30.9k tokens; after fixes, 12.1k–26.0k 
 the model's batching behaviour). There is no reliable improvement on a 5-file fixture yet; the
 Phase 5 benchmark is needed to settle it.
 
+### Build 004: Phase 4, code editing and execution (2026-11-26)
+
+**Purpose:** let the agent change code and run commands, and verify its fixes, without ever being
+able to destroy the user's work.
+
+| Module | Added |
+|---|---|
+| `safety.checkpoints` | `CheckpointStore`: first-change backups + manifest; `restore()` skips files the user changed afterwards (ADR-030) |
+| `safety.git_guard` | `dirty_files()`: uncommitted and untracked files at task start (ADR-032); `run_git` |
+| `safety.commands` | `split_command` (no shell; Windows-safe), `classify` → SAFE / NORMAL / DESTRUCTIVE / BLOCKED (ADR-031) |
+| `tools.process` | `run_process`: no shell, timeout + process-tree kill, cancellation, `CI=true`, provider keys removed from the child environment |
+| `tools.write_guard` | `run_guarded`: guarded files backed up + project fingerprinted; changes to guarded files reverted and flagged (ADR-033) |
+| `tools.base` | `Assessment` + `Tool.assess()` (ADR-034); `ToolContext` gains checkpoints, protected/denied paths, test command, scrub list |
+| `tools.builtin.editing` | `edit_file`, `apply_patch`, `create_file`, `delete_file`: plan → backup → atomic write → read-back check; encoding/EOL preserved |
+| `tools.builtin.execution` | `run_command`, `run_tests` (summaries for 8 frameworks; verification evidence), `inspect_git` |
+| `agent.executor` | assess → certain failure / blocked → policy → escalation → approval (with diff) → run → evidence; binding denials; violation counting |
+| `agent.orchestrator` | workspace setup; independent verification (ADR-029); fix-attempt limit; `SAFETY_VIOLATION`; context compaction (ADR-036); `INTERNAL_ERROR` (ADR-035) |
+| `agent.state` | `StopReason.INTERNAL_ERROR`; `changed_files`, `checkpoint_dir`, `command_changed_files` |
+| `cli` | `trace undo`, `run --test-command`, y / n / a approvals with a coloured diff, final report with changes, verification and the undo hint |
+
+**Verified:** 317 tests (most use real files and real subprocesses). Live on Gemini: a real
+**verified_fix** (reproduce → 3-file trace → 3-line edit → tests pass → Trace's independent re-run
+passes), confirmed independently with `git diff`; `trace undo` restored the file byte for byte;
+protected-file scenario: edit denied, bypass attempt **reverted** by the write guard, honest
+"diagnosed". **Found live and fixed:** the approval EOF crash (ADR-035), non-binding denials
+(ADR-033), and Windows `\"` parsing (ADR-031).
+
 ---
 
 ## 4. Package layout (current)
@@ -138,10 +168,17 @@ src/trace_agent/
   safety/         permissions.py       PermissionLevel, ExecutionMode, Decision, decide()
                   paths.py             resolve_in_project, is_sensitive_path
                   redaction.py         Redactor
-  tools/          base.py              Tool, ToolInput, ToolResult, ToolContext
+                  checkpoints.py       CheckpointStore (backups, undo)            [B004]
+                  git_guard.py         dirty_files, run_git                       [B004]
+                  commands.py          split_command, classify (command risk)     [B004]
+  tools/          base.py              Tool, ToolInput, ToolResult, ToolContext, Assessment
                   registry.py          ToolRegistry, parse_call
+                  process.py           run_process (no shell, timeout, tree kill) [B004]
+                  write_guard.py       run_guarded (binding protection)           [B004]
                   builtin/filesystem.py      list_files, read_file, search_code
                   builtin/context_tools.py   get_project_info, parse_stack_trace, inspect_logs
+                  builtin/editing.py         edit_file, apply_patch, create_file, delete_file  [B004]
+                  builtin/execution.py       run_command, run_tests, inspect_git               [B004]
   context/        ignore.py, project.py, stacktrace.py, selection.py
   agent/          state.py             AgentTask, ActionRecord, Hypothesis, VerificationResult
                   builtins.py          finish_task, record_hypothesis
@@ -215,11 +252,11 @@ Mapped to the spec's 10-step loop:
 | 2 | Observe | `build_task_context`: overview + parsed traces + failing-frame snippets + error-text hits, redacted and appended to the task message; CONTEXT_COLLECTED event |
 | 3 | Reason | `provider.complete(messages, tools = registry tools + record_hypothesis + finish_task)` |
 | 4 | Decide | no tool call → nudge (max 2) then NO_PROGRESS; `record_hypothesis` → task state; `finish_task` → checked report; other calls → step 5 |
-| 5 | Authorize | `ToolExecutor`: `parse_call` (schema) → `decide(mode, permission)` → `Approver` on ASK |
-| 6 | Act | `tool.run(args, ToolContext)` (crashes become ERROR results) |
+| 5 | Authorize | `ToolExecutor`: `parse_call` (schema) → `tool.assess()` (effective permission, certain failure, blocked, preview) → `decide(mode, permission)` → escalation for protected/denied files → `Approver` on ASK (diff shown) |
+| 6 | Act | `tool.run(args, ToolContext)`: edits go through checkpoints; commands through `run_guarded` + `run_process` (crashes become ERROR results) |
 | 7 | Observe result | redact → truncate (head + tail) → `render_tool_result` |
 | 8 | Update | action stage advanced; tool message appended; TOOL_* events |
-| 9 | Evaluate | repeat detector (warn at 3, stop at 4); `finish_task` accepted only if valid, alone, and (for "fixed") verified |
+| 9 | Evaluate | repeat detector (warn at 3, stop at 4); blocked/violation count (stop at 3); failed-fix limit; `finish_task` accepted only if valid and alone, and for "fixed" only after a modification **and** Trace's own passing test run |
 | 10 | Repeat / finish | until a stop condition; TASK_FINISHED; `HistoryStore.save_task`; `render_final_report` |
 
 Every stop condition in the spec maps to a `StopReason` (section 8).
@@ -241,6 +278,12 @@ contain prompt injection or secrets), stack-trace paths, and `config.toml` conte
 | Provider errors → user | adapter redacts the key from vendor messages | B002 |
 | `config.toml` | unknown fields and credential-like `options` keys rejected; no keys ever written | B001 |
 | Observers → loop | `CompositeSink` isolates sink failures; the CLI replaces unencodable characters | B002 |
+| Model → file changes | editing tools only with a checkpoint store; plan → backup → atomic write → read-back check | B004 |
+| Model → commands | no shell; classified SAFE/NORMAL/DESTRUCTIVE/BLOCKED before authorization | B004 |
+| Commands → protected files | write guard restores guarded files and flags a violation (3 → `SAFETY_VIOLATION`) | B004 |
+| User's uncommitted work | git snapshot at task start; changes need explicit approval even in auto | B004 |
+| Commands → provider keys | Trace's provider key variables removed from every child process | B004 |
+| Approval prompt → loop | EOF counts as a denial; any unexpected exception → `INTERNAL_ERROR`, task still saved | B004 |
 
 **Credential resolution order** (ADR-020): profile `api_key_env` → provider's conventional env var
 → `CredentialStore` (the keyring is 🔜). Keys exist in memory only as `SecretStr`.
@@ -268,12 +311,15 @@ Hypothesis:   proposed ⇄ supported ⇄ rejected   (each transition stored, e.g
 | ITERATION_LIMIT | STOPPED | `max_iterations` reached |
 | NO_PROGRESS | STOPPED | repeated identical call ×4, or 3 text-only replies |
 | PROVIDER_UNAVAILABLE | FAILED | `ProviderError` after adapter retries |
-| SAFETY_VIOLATION | FAILED | reserved (no producer yet) |
+| SAFETY_VIOLATION | FAILED | 3 blocked commands or write-guard violations (B004) |
+| INTERNAL_ERROR | FAILED | unexpected exception in the loop; traceback recorded (B004) |
 | USER_INTERRUPTED | CANCELLED | Ctrl-C |
 | APPROVAL_PENDING | AWAITING_APPROVAL | reserved (approvals block in the terminal, ADR-012) |
 
 `is_fix_verified()`: at least one successful WRITE/DESTRUCTIVE action, and the latest verification
-recorded after the last such action passed. No producer of verifications exists until Phase 4.
+recorded after the last such action passed. Verifications come from `run_tests` (the agent's runs
+and Trace's independent run, ADR-029). `NO_PROGRESS` is also produced when failed post-edit
+verifications exceed `max_retry_attempts`.
 
 ---
 
@@ -297,10 +343,11 @@ options = { temperature = 0.2 }    # passed through; credential-like keys reject
 [agent]
 execution_mode = "confirm"         # plan | confirm | auto
 max_iterations = 30
-command_timeout_seconds = 60.0     # passed to ToolContext; enforced by Phase 4 subprocess tools
+command_timeout_seconds = 60.0     # per command/test run; the process tree is killed on timeout
 max_output_chars = 20000           # tool-output truncation (head + tail)
 system_prompt_file = "brain.md"    # optional custom brain (ADR-024)
-max_retry_attempts = 3             # ⚠️ accepted but not used: provider retries come from the profile's max_retries
+max_retry_attempts = 3             # failed post-edit verifications allowed before the task stops (B004)
+test_command = "python -m pytest"  # optional: override the detected test command used for verification
 
 [storage]
 history_retention_days = 90        # pruned at the start of each run; omit for "forever"
@@ -312,7 +359,8 @@ history_retention_days = 90        # pruned at the start of each run; omit for "
 |---|---|---|
 | `config.toml` | non-secret configuration | ✅ |
 | `history.db` | `tasks` (outcome, usage, report) + `events` (ordered, redacted trace) | ✅ |
-| `cache/`, `logs/` | created by `TracePaths.ensure()` | ⚠️ unused |
+| `cache/checkpoints/<task>/` | backups + `manifest.json` for `trace undo` | ✅ (B004) |
+| `logs/` | created by `TracePaths.ensure()` | ⚠️ unused |
 | credentials | environment variables | ✅ · OS keyring 🔜 |
 
 ---
@@ -339,6 +387,11 @@ history_retention_days = 90        # pruned at the start of each run; omit for "
 | `parse_stack_traces` / `locate_frames` | context.stacktrace | text → `StackTrace[]` → frames mapped to the project |
 | `build_task_context` | context.selection | `(description, root) -> TaskContext` (bounded) |
 | `EventSink` | observability.events | `emit(ExecutionEvent)` |
+| `Tool.assess` / `Assessment` | tools.base | per-call effective permission, approval reason, blocked, preview, certain failure, paths |
+| `CheckpointStore` | safety.checkpoints | `before_change`, `after_change`, `changed_files`, `restore(force)`, `open`, `list_all` |
+| `split_command` / `classify` | safety.commands | command line → argv (no shell) → `Classification(risk, reason)` |
+| `run_process` | tools.process | argv → `ProcessResult` (exit code, output, timed_out, cancelled) |
+| `run_guarded` | tools.write_guard | `(root, guarded, action) -> (result, GuardReport)` |
 
 Extension points that need no orchestrator change: a new provider type (`ProviderSpec`), a new
 connection library (adapter factory), a new secret backend (`CredentialStore`), a new tool
@@ -348,7 +401,7 @@ connection library (adapter factory), a new secret backend (`CredentialStore`), 
 
 ## 11. Testing architecture
 
-217 tests (216 pass, 1 skipped on Windows without Developer Mode: the symlink-escape test).
+318 tests (317 pass, 1 skipped on Windows without Developer Mode: the symlink-escape test). Build 004 added 101: commands and process (45), editing and checkpoints (20), execution and git (14), fix loops through the orchestrator (20, real pytest subprocesses, only the model scripted), CLI undo (1), registry split (1).
 
 | Area | Tests | Approach |
 |---|---|---|
@@ -371,12 +424,17 @@ recorded in BUILD_LOG (not in CI: they need a key and cost quota).
 
 | Item | Impact | Plan |
 |---|---|---|
-| No context-window management | long investigations will eventually fail with a context error | compaction / summarization of old tool output (before Phase 6) |
-| No write or exec tools | Trace can diagnose but not fix or verify | Phase 4 |
-| Verification producer missing | `VERIFIED_FIX` is unreachable in practice | Phase 4 `run_tests` → `add_verification` |
-| In-process tools have no timeout | bounded only by size limits | Phase 4 subprocess tools enforce `command_timeout_seconds` |
-| ⚠️ `[agent] max_retry_attempts` unused | a config field that does nothing | remove, or wire it to tool retries in Phase 4 |
-| ⚠️ `cache/`, `logs/` unused | empty directories | use them or stop creating them |
+| Basic context management only | output elision by characters, not tokens (ADR-036) | token-accurate budgeting / summarization |
+| ~~No write or exec tools~~ | — | ✅ Build 004 |
+| ~~Verification producer missing~~ | — | ✅ Build 004 (`run_tests` + independent verification) |
+| In-process read tools have no timeout | bounded by size limits; commands *are* time-limited (B004) | low priority |
+| ~~`max_retry_attempts` unused~~ | — | ✅ Build 004 (limits failed fix attempts) |
+| ⚠️ `logs/` unused | an empty directory | use it or stop creating it |
+| Files changed by *commands* aren't undoable | reported, but `trace undo` can't restore them | snapshot candidate files, or rely on git |
+| Write guard fingerprints by size + mtime | a same-size, same-mtime rewrite of a non-guarded file goes unnoticed | hash-based check for small projects |
+| No sandbox for commands | they can touch files outside the project or the network | P-9 / Phase 6 |
+| Token cost with 15 tools (41k–57k per task) | cost and latency | Phase 5 measurement; tool subsets per phase of a task |
+| Interactive approvals not yet exercised by a human | UX unknowns | manual test in a real terminal |
 | History row written only at task end | a hard crash leaves events but no task row | write the row at start, update at end |
 | Message-level Gemini thought signatures not preserved | possible degradation on text-only Gemini 3 turns | carry `provider_specific_fields` on `Message` |
 | Efficiency variance (4–8 steps for one task) | unpredictable cost | Phase 5 benchmark to measure; prompt/brain tuning |

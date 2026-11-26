@@ -59,6 +59,7 @@ class StopReason(StrEnum):
     SAFETY_VIOLATION = "safety_violation"
     USER_INTERRUPTED = "user_interrupted"
     PROVIDER_UNAVAILABLE = "provider_unavailable"
+    INTERNAL_ERROR = "internal_error"  # a bug in Trace (or an unexpected environment failure)
 
 
 _STATUS_FOR_REASON: dict[StopReason, TaskStatus] = {
@@ -71,6 +72,7 @@ _STATUS_FOR_REASON: dict[StopReason, TaskStatus] = {
     StopReason.APPROVAL_PENDING: TaskStatus.AWAITING_APPROVAL,
     StopReason.SAFETY_VIOLATION: TaskStatus.FAILED,
     StopReason.PROVIDER_UNAVAILABLE: TaskStatus.FAILED,
+    StopReason.INTERNAL_ERROR: TaskStatus.FAILED,
     StopReason.USER_INTERRUPTED: TaskStatus.CANCELLED,
 }
 
@@ -167,6 +169,11 @@ class AgentTask(BaseModel):
     summary: str | None = None
     report: dict[str, Any] | None = Field(
         default=None, description="Structured final report from the agent (root cause, evidence, fix...)."
+    )
+    changed_files: list[dict[str, str]] = Field(default_factory=list, description="Net file changes (from checkpoints).")
+    checkpoint_dir: str | None = Field(default=None, description="Where backups for `trace undo` are kept.")
+    command_changed_files: list[str] = Field(
+        default_factory=list, description="Files changed by commands (not by editing tools): not covered by `trace undo`."
     )
     model_calls: int = Field(default=0, ge=0)
     prompt_tokens: int = Field(default=0, ge=0)

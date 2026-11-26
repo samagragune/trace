@@ -21,6 +21,27 @@ It is bounded (ADR-015), recorded as a CONTEXT_COLLECTED event, and can be turne
 evidence. Each transition is stored (`proposed@1`, `proposed->rejected@4`) and shown in the terminal,
 the history and the final report.
 
+## Changing code and verifying (Build 004)
+
+Workspace prepared per task: a git snapshot of the user's uncommitted files, a checkpoint store,
+and the project's test command (detected, or `[agent] test_command` / `--test-command`).
+
+```
+run_tests  (reproduce: failure recorded as a verification with passed=False)
+   -> read / search / hypothesize
+   -> edit_file | apply_patch   (assess -> approve with diff -> backup -> write -> verify write)
+   -> run_tests  (pass/fail recorded after the modification)
+   -> finish_task(fixed)
+        -> Trace runs the test command ITSELF (independent verification)
+        -> accepted only if the latest post-change verification passed
+```
+
+Limits that apply to this phase:
+- **failed fix attempts:** more than `max_retry_attempts` failed post-change verifications stops the
+  task (NO_PROGRESS), with a warning to the model before the last attempt;
+- **safety:** 3 blocked commands or write-guard violations stop the task (SAFETY_VIOLATION);
+- **context budget:** the oldest tool outputs are elided above 160k characters (ADR-036).
+
 ## Ending a task: the `finish_task` tool
 
 The model ends a task only by calling the built-in `finish_task` tool, with `outcome`, `summary`,
@@ -29,7 +50,7 @@ before accepting it:
 
 | outcome | accepted when | StopReason |
 |---|---|---|
-| `fixed` | `task.is_fix_verified()`; otherwise rejected and the model is told why | VERIFIED_FIX |
+| `fixed` | a successful modification, then Trace's own test run passes (`is_fix_verified()`); otherwise rejected with the reason | VERIFIED_FIX |
 | `diagnosed` | always (reported as "diagnosis only") | DIAGNOSED |
 | `no_fix_needed` | always | NO_FIX_NEEDED |
 | `insufficient_information` | always | INSUFFICIENT_INFORMATION |
@@ -123,6 +144,6 @@ check cannot produce a "completed" task.
 |---|---|
 | VERIFIED_FIX, NO_FIX_NEEDED, DIAGNOSED | COMPLETED |
 | ITERATION_LIMIT, NO_PROGRESS, INSUFFICIENT_INFORMATION | STOPPED |
-| SAFETY_VIOLATION, PROVIDER_UNAVAILABLE | FAILED |
+| SAFETY_VIOLATION, PROVIDER_UNAVAILABLE, INTERNAL_ERROR | FAILED |
 | USER_INTERRUPTED | CANCELLED |
 | APPROVAL_PENDING | AWAITING_APPROVAL (resumable) |

@@ -20,6 +20,7 @@ from trace_agent.cli.render import ConsoleEventPrinter
 from trace_agent.observability.sinks import CompositeSink, RedactingSink
 from trace_agent.providers.base import ModelProvider
 from trace_agent.providers.factory import DEFAULT_FACTORY, ProviderFactory
+from trace_agent.providers.registry import DEFAULT_PROVIDERS
 from trace_agent.safety.permissions import ExecutionMode
 from trace_agent.safety.redaction import Redactor
 from trace_agent.storage.config import TraceConfig
@@ -37,6 +38,7 @@ class RunOptions:
     profile: str | None = None
     max_iterations: int | None = None
     verbose: bool = False
+    test_command: str | None = None
 
 
 def build_provider(
@@ -72,6 +74,12 @@ def run_task(
     history.prune(config.storage.history_retention_days)
     sink = RedactingSink(CompositeSink([ConsoleEventPrinter(console, verbose=options.verbose), history]), redactor)
 
+    # Hide Trace's own provider keys from every command the agent runs.
+    scrub = {spec.api_key_env for spec in DEFAULT_PROVIDERS if spec.api_key_env}
+    for profile in config.profiles.values():
+        if profile.effective_api_key_env:
+            scrub.add(profile.effective_api_key_env)
+
     orchestrator = Orchestrator(
         provider,
         default_registry(),
@@ -80,6 +88,10 @@ def run_task(
             max_iterations=options.max_iterations or agent_cfg.max_iterations,
             max_output_chars=agent_cfg.max_output_chars,
             tool_timeout_seconds=agent_cfg.command_timeout_seconds,
+            checkpoint_dir=paths.checkpoint_dir,
+            test_command=options.test_command or agent_cfg.test_command,
+            max_fix_attempts=agent_cfg.max_retry_attempts,
+            scrub_env=frozenset(scrub),
         ),
         sink=sink,
         approver=approver,

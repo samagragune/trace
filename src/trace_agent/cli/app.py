@@ -1,6 +1,7 @@
 """The ``trace`` command.
 
 Commands: ``trace`` (interactive session), ``run``, ``status``, ``history``, ``config ...``.
+Commands: ``undo`` restores files changed by a task (Build 004).
 Not yet implemented, and therefore not registered: ``init`` wizard, keyring key storage
 (``set-key``/``remove-key``) and ``reset``.
 """
@@ -156,16 +157,63 @@ def run(
     mode: Annotated[ExecutionMode | None, typer.Option(help="Override the execution mode.")] = None,
     profile: Annotated[str | None, typer.Option(help="Use this provider profile instead of the active one.")] = None,
     max_iterations: Annotated[int | None, typer.Option(min=1, max=200, help="Override the iteration limit.")] = None,
-    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show model text and tool output.")] = False,
+    verbose: Annotated[bool, typer.Option("--verbose", "-v", help="Show model text, tool output and diffs.")] = False,
+    test_command: Annotated[
+        str | None, typer.Option("--test-command", help="Command used to verify fixes (default: detected).")
+    ] = None,
 ) -> None:
-    """Investigate a problem once and print the result."""
+    """Investigate a problem, fix it when the mode allows, verify, and print the result."""
     config = _load(_store())
     options = RunOptions(
-        project_root=project.resolve(), mode=mode, profile=profile, max_iterations=max_iterations, verbose=verbose
+        project_root=project.resolve(), mode=mode, profile=profile, max_iterations=max_iterations,
+        verbose=verbose, test_command=test_command,
     )
     task = _execute(description, config, options)
     if task.status not in (TaskStatus.COMPLETED,):
         raise typer.Exit(code=2)
+
+
+# --------------------------------------------------------------------------- undo
+
+
+@app.command()
+def undo(
+    task_id: Annotated[str | None, typer.Argument(help="Task id or prefix (default: most recent task with changes).")] = None,
+    force: Annotated[bool, typer.Option("--force", help="Also restore files you edited after Trace changed them.")] = False,
+) -> None:
+    """Restore every file a task changed to its state before the task."""
+    from trace_agent.safety.checkpoints import CheckpointError, CheckpointStore
+
+    root = TracePaths.from_env().checkpoint_dir
+    candidates = CheckpointStore.list_all(root)
+    if task_id:
+        candidates = [d for d in candidates if d.name.startswith(task_id)]
+        if len(candidates) > 1:
+            raise _fail(f"'{task_id}' matches several tasks; use a longer prefix")
+    else:
+        candidates = [d for d in candidates if CheckpointStore.open(d).changed_files()][:1]
+    if not candidates:
+        raise _fail("no task with recorded changes found" + (f" for '{task_id}'" if task_id else ""))
+    try:
+        store = CheckpointStore.open(candidates[0])
+    except CheckpointError as exc:
+        raise _fail(str(exc)) from None
+    changes = store.changed_files()
+    if not changes:
+        console.print(f"Task {store.task_id[:8]}: nothing to undo (files already match their originals).")
+        return
+    console.print(f"Undoing task {store.task_id[:8]} in {escape(str(store.project_root))}", soft_wrap=True)
+    report = store.restore(force=force)
+    for path in report.restored:
+        console.print(f"  [green]restored[/green] {escape(path)}")
+    for path in report.deleted:
+        console.print(f"  [green]removed[/green]  {escape(path)} (created by Trace)")
+    for path in report.skipped:
+        console.print(f"  [yellow]skipped[/yellow]  {escape(path)}: changed after Trace edited it (use --force)")
+    for error in report.errors:
+        console.print(f"  [red]error[/red]    {escape(error)}")
+    if report.skipped or report.errors:
+        raise typer.Exit(code=1)
 
 
 # --------------------------------------------------------------------------- history

@@ -188,9 +188,10 @@ def test_keyboard_interrupt_cancels(repo):
 def test_tools_and_finish_sent_to_model(repo):
     _, provider, _ = run([finish()], repo)
     names = [t.name for t in provider.requests[0].tools]
+    # Only tools that work here are offered: no checkpoint store -> no editing tools; not a git repo -> no inspect_git.
     assert names == [
         "get_project_info", "list_files", "read_file", "search_code", "parse_stack_trace", "inspect_logs",
-        "record_hypothesis", FINISH_TOOL_NAME,
+        "run_tests", "run_command", "record_hypothesis", FINISH_TOOL_NAME,
     ]
     first_user = provider.requests[0].messages[1].content
     assert "registration crashes" in first_user and "read-only" in first_user

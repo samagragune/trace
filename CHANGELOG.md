@@ -5,6 +5,23 @@ All notable changes to this project are documented here. Format follows
 
 ## [Unreleased]
 
+### Added (Phase 4, Build 004)
+- Code changes: `edit_file`, `apply_patch`, `create_file`, `delete_file`, with backups,
+  encoding/line-ending preservation, verified writes and diff output.
+- Commands: `run_command` and `run_tests` (shell-free, risk-classified, time-limited, process-tree
+  kill, provider keys removed from the environment); `inspect_git`.
+- Independent verification: "fixed" is accepted only after Trace's own passing test run.
+- `trace undo`; per-task checkpoints in `~/.trace/cache/checkpoints/`.
+- Protection of uncommitted user files; write guard making denials binding for commands.
+- Approval prompts with a coloured diff and y / n / a answers; `run --test-command`;
+  `[agent] test_command`.
+- Fix-attempt limit (`max_retry_attempts`), SAFETY_VIOLATION stop, context-budget compaction.
+
+### Fixed (found in live testing)
+- A closed stdin in the approval prompt crashed the run (now a denial; internal errors are recorded).
+- The model could work around a denied edit via `run_command` (now reverted and flagged).
+- Windows command parsing broke on escaped quotes.
+
 ### Added (Phase 3, Build 003)
 - Project detection (languages, package managers, frameworks, test command, git status).
 - Stack-trace parsing for Python, JS/Node, Java/Kotlin, Go, Rust and Ruby, with frame-to-project

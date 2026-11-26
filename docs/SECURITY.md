@@ -61,15 +61,31 @@ Tool output is redacted for credential patterns before it reaches the model, whi
 Build 002's tools are read-only. `read_file` refuses sensitive files, `search_code` skips them, and
 both enforce the project boundary.
 
+### Code changes and commands ✅ (Build 004)
+- **Backups and undo (ADR-030).** The first change to any file is preceded by a backup;
+  `trace undo` restores everything, and never overwrites a file the user edited afterwards unless
+  `--force`. Without a checkpoint store, editing tools aren't offered.
+- **Uncommitted user work (ADR-032).** Files with uncommitted git changes at task start need
+  explicit approval to change, even in auto mode; without a terminal they are denied.
+- **Commands (ADR-031).** No shell. Classified before authorization: SAFE (tests, linters, read-only
+  git) runs; NORMAL asks in confirm and plan; DESTRUCTIVE always asks; BLOCKED never runs (`sudo`,
+  disk tools, `git push`, `npm publish`, nested shells).
+- **Binding denials: the write guard (ADR-033).** Every command runs with guarded files (uncommitted
+  work + denied files) backed up and the project fingerprinted; guarded files changed by a command
+  are restored and the attempt counts as a violation (3 → `SAFETY_VIOLATION`). Found and fixed live:
+  the model tried to bypass a denied edit with `python -c`.
+- **Process hygiene.** Timeouts kill the whole process tree; Ctrl-C cancels running commands;
+  stdin is closed; Trace's provider key variables are removed from every child environment.
+- **Verification can't be faked (ADR-029).** "Fixed" requires Trace's own passing test run after the
+  last change.
+
 ## Planned 🔜
 
 | Control | Phase |
 |---|---|
 | OS keyring credential store | 1 (deferred) |
-| Command risk classifier (escalates EXECUTE → DESTRUCTIVE) | 4 |
-| Git state check: never overwrite uncommitted user changes | 4 |
-| Checkpoints and backups before edits | 4 |
-| Subprocess timeouts, output limits, cancellation | 4 |
+| Sandboxing commands (outside-project files, network) | 6 (P-9) |
+| Undo for files changed by commands | later |
 
 ## Known risk
 Prompt injection: repository content read by Trace is sent to the model and could contain

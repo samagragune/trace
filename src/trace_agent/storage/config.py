@@ -139,7 +139,12 @@ class AgentSettings(BaseModel):
 
     execution_mode: ExecutionMode = DEFAULT_EXECUTION_MODE
     max_iterations: int = Field(default=30, ge=1, le=200)
-    max_retry_attempts: int = Field(default=3, ge=0, le=10)
+    max_retry_attempts: int = Field(
+        default=3, ge=0, le=10, description="Failed post-edit verifications allowed before the task stops."
+    )
+    test_command: str | None = Field(
+        default=None, description="Override the detected test command used for verification."
+    )
     command_timeout_seconds: float = Field(default=60.0, gt=0, le=600)
     max_output_chars: int = Field(default=20_000, ge=1_000, le=200_000)
     system_prompt_file: str | None = Field(

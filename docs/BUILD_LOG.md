@@ -148,3 +148,71 @@ it as a markup tag).
 message-hit selection is lexical, not semantic. Monorepo detection only covers the root (or a
 directory passed to `get_project_info`). The model still sometimes re-reads files after it has
 enough evidence.
+
+---
+
+## Build 004: Phase 4, code editing and execution (2026-11-26)
+
+**Objective.** The agent changes code, runs commands and tests, iterates on failures, and reports
+"fixed" only when the fix is verified, without ever being able to destroy the user's work.
+
+**Delivered.**
+- **Safety layer:** `safety/checkpoints.py` (per-task backups; restore refuses to clobber later
+  user edits unless forced), `safety/git_guard.py` (snapshot of files with uncommitted changes at
+  task start), `safety/commands.py` (shell-free parsing; SAFE / NORMAL / DESTRUCTIVE / BLOCKED
+  classification mapped onto the permission policy).
+- **Tools:** `edit_file` (exact replace, closest-match hints, CRLF/BOM preserved), `apply_patch`
+  (multi-file unified diff, all-or-nothing, line numbers treated as hints), `create_file`,
+  `delete_file`, `run_command`, `run_tests` (summaries for pytest, jest, vitest, mocha, unittest,
+  cargo, go, maven), `inspect_git` (status, diff, log, show, blame).
+- **Process runner:** no shell, timeout with process-tree kill, cancellation, `CI=true`,
+  provider keys removed from the child environment, Windows `.cmd` shims resolved.
+- **Executor:** a `Tool.assess()` step (effective permission per call, forced approval, blocked,
+  diff preview, certain-failure short-circuit), verification and file-change evidence recording,
+  and binding denials.
+- **Orchestrator:** workspace setup (git snapshot, checkpoints, test command), **independent
+  verification** on a "fixed" claim, limit on failed fix attempts (`max_retry_attempts`, resolves
+  P-4), `SAFETY_VIOLATION` after 3 blocked or guard-violating attempts, context-budget compaction
+  (resolves P-5 at a basic level), and `INTERNAL_ERROR` handling (the task record is never lost).
+- **Write guard** (`tools/write_guard.py`): every command runs with guarded files backed up and
+  the project fingerprinted; guarded files changed by a command are restored at once and reported
+  as a violation.
+- **CLI:** `trace undo`, `run --test-command`, diff-preview approvals (y / n / a), and a final
+  report listing changed files, the last verification and the undo hint.
+
+**Tests.** 317 passed, 1 skipped (the symlink test). New: commands and process runner (45),
+editing and checkpoints (20), execution tools and git (14), fix loops through the orchestrator (20,
+with real pytest subprocesses and only the model scripted), and the CLI `undo` command.
+
+**Live verification (gemini-3.5-flash-lite, buggy-shop fixture as a git repository).**
+
+| Scenario | Result |
+|---|---|
+| `--mode auto`, clean repo | ✅ **verified_fix**: reproduced (1 failed), traced across 3 files, one 3-line edit, tests passed, Trace's independent re-run passed. 8 steps, 41k tokens, 53s. `git diff` independently confirmed exactly the 3 changed values. |
+| `trace undo` | ✅ restored the file; `git diff` empty; the original test failure was back |
+| File with uncommitted user changes, `--mode auto`, no TTY (run 1) | ⚠️ protection held, but **a crash and a bypass attempt** (below) |
+| Same, after fixes (run 2) | ✅ edit denied; the model's write from `python -c` was detected and **reverted** by the write guard; finished as an honest "diagnosed". 10 steps, 57k tokens. `git diff` showed only the user's own note. |
+
+**Bugs and gaps found only by running it live (all fixed, with regression tests):**
+1. **The approval prompt crashed the run.** Stdin looked like a terminal but was closed, so
+   `Prompt.ask` raised `EOFError`; the exception escaped the loop and no history row was written.
+   Fix: EOF counts as a denial (and denies every later request); the orchestrator now turns any
+   unexpected exception into `INTERNAL_ERROR` with a traceback event, and the task is always saved.
+2. **Denials were not binding (serious).** After the edit was denied, the model made 15+ attempts
+   to write the file through `run_command("python -c ...")`, which is allowed in auto mode. The file
+   survived only because Windows quote parsing broke those commands. Fix: the write guard (ADR-033),
+   denied files join the guarded set, violations count toward `SAFETY_VIOLATION`, and the prompt
+   forbids workarounds. Verified live: the next attempt was reverted and the model stopped.
+3. **Windows command parsing** broke `\"` escapes (`python -c "print(\"hi\")"`). Fix: POSIX
+   splitting with lone backslashes doubled first, so paths survive (ADR-034).
+4. Non-interactive denials said "the user declined"; they now say *why* the action was denied.
+
+**Known limitations.**
+- Files changed by *commands* (not editing tools) are detected and reported, but `trace undo`
+  can't restore them; git can.
+- The write guard fingerprints by size + mtime, so a non-guarded file rewritten with identical size
+  and mtime would go unnoticed. Guarded files are compared byte for byte.
+- The suite now takes about 2 minutes (real subprocesses + fingerprinting).
+- The interactive approval prompt (y / n / a with a diff) is unit-tested, but has not yet been
+  exercised by a human in a real terminal.
+- Token cost grew with 15 tools (41k–57k per task on this fixture).

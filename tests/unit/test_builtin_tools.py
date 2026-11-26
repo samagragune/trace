@@ -25,12 +25,18 @@ def ctx(repo):
     return ToolContext(project_root=repo)
 
 
-def test_default_registry_is_read_only():
-    reg = default_registry()
+def test_read_only_registry_is_read_only():
+    reg = default_registry(read_only=True)
     assert reg.names() == [
-        "get_project_info", "list_files", "read_file", "search_code", "parse_stack_trace", "inspect_logs"
+        "get_project_info", "list_files", "read_file", "search_code", "parse_stack_trace", "inspect_logs", "inspect_git"
     ]
     assert {reg.get(n).permission.value for n in reg.names()} == {"read"}
+
+
+def test_full_registry_adds_change_tools():
+    names = default_registry().names()
+    for tool in ("edit_file", "apply_patch", "create_file", "delete_file", "run_tests", "run_command"):
+        assert tool in names
 
 
 def test_list_files_top_level_skips_noise(ctx):

@@ -1,6 +1,6 @@
 # Architecture decision records
 
-**Last updated:** 2026-11-25 (through Build 003)
+**Last updated:** 2026-11-26 (through Build 004)
 
 Format per record: **Context → Decision → Alternatives → Consequences.** Statuses: *Accepted*,
 *Superseded (by ADR-n)*, *Partially superseded*, *Proposed*. ADRs are never deleted; when a decision
@@ -43,6 +43,14 @@ Related: [ARCHITECTURE.md](ARCHITECTURE.md) (the system as built) ·
 | 017 | Tool output is redacted before reaching the model | 3 | 003 | Accepted |
 | 018 | `context/ignore.py` breaks the tools↔context cycle | 3 | 003 | Accepted |
 | 028 | Token efficiency: compact schemas and batching guidance | 3 | 003 | Accepted |
+| 029 | Independent verification of "fixed" claims | 4 | 004 | Accepted |
+| 030 | Per-task checkpoints; undo never clobbers later user edits | 4 | 004 | Accepted |
+| 031 | Shell-free commands with risk classification | 4 | 004 | Accepted |
+| 032 | Uncommitted user files always need approval (interpretation of "never overwrite") | 4 | 004 | Accepted, needs user confirmation (P-7) |
+| 033 | Write guard: denials and protection are binding for commands | 4 | 004 | Accepted |
+| 034 | `Tool.assess()`: per-call effective permission, preview, certain-failure short-circuit | 4 | 004 | Accepted |
+| 035 | Robustness: approvals degrade to deny; internal errors never lose the task | 4 | 004 | Accepted |
+| 036 | Context budget: elide oldest tool outputs | 4 | 004 | Accepted (basic) |
 
 ADR numbers reflect the order in which records were *written*. ADRs 019–028 document decisions
 that were made during Builds 001–003 and written up retroactively on 2026-11-25. The index orders
@@ -369,6 +377,110 @@ reliable improvement. That needs the Phase 5 benchmark (many runs per configurat
 
 ---
 
+## Phase 4, Build 004: code editing and execution
+
+### ADR-029: Independent verification of "fixed" claims
+*Accepted, Build 004*
+
+**Context.** The model chooses which test command to run, so it could verify with a narrow subset,
+or not test at all, and then claim "fixed".
+
+**Decision.** On `finish_task(fixed)` the orchestrator requires a successful modification, then
+**runs the project's test command itself** (detected, or set with `[agent] test_command` /
+`--test-command`) through the normal executor path, and accepts only if `is_fix_verified()` holds
+afterwards. When no test command is known, it falls back to the agent's own `run_tests` evidence,
+and the final report shows exactly which command produced the verification.
+
+**Consequences.** Claims are checked against reality (a wrong "fix" is rejected with "Trace's own
+test run: failed" and the loop continues). The suite runs once more per accepted fix.
+
+### ADR-030: Per-task checkpoints; undo never clobbers later user edits
+*Accepted, Build 004*
+
+Before the *first* change to a file during a task, its original bytes are copied to
+`~/.trace/cache/checkpoints/<task>/` with a manifest (`existed`, original hash, hash of what Trace
+last wrote). Later changes keep the first backup. `trace undo` restores a file only if its current
+content still equals what Trace wrote (otherwise it is *skipped*, unless `--force`) and deletes
+files Trace created. Writes are atomic and keep permissions. Without a checkpoint store, editing
+tools aren't offered at all: Trace never makes changes it can't undo.
+
+### ADR-031: Shell-free commands with risk classification
+*Accepted, Build 004*
+
+**Decision.** Commands are split into argv and run with `shell=False`; pipes, redirection, `&&` and
+`;` are rejected with an explanation. Each command is classified before authorization:
+
+| Risk | Permission | Examples |
+|---|---|---|
+| SAFE | READ (runs in every mode) | test runners, linters (without `--fix`), `git status/diff/log`, version checks |
+| NORMAL | EXECUTE | scripts, builds, installs, anything unrecognized |
+| DESTRUCTIVE | DESTRUCTIVE (always asks) | `rm`, `mv`, `git reset/clean/checkout/commit`, `kill`, uninstalls |
+| BLOCKED | never runs | `sudo`, disk tools, `git push`, `npm publish`, nested shells (`bash -c`) |
+
+**Accepted trade-off:** "SAFE" means "doesn't change state by design", not "harmless"; tests run
+project code. Running tests is the core verification step, so tests run without approval. The
+write guard (ADR-033) bounds what any command can do to protected files.
+
+**Rejected:** running through a shell (injection, unclassifiable), or an allow-list only (too
+restrictive for builds and scripts). Windows parsing uses POSIX rules after doubling lone
+backslashes, so both `\"` escapes and `C:\paths` work (a live bug before the fix).
+
+### ADR-032: Uncommitted user files always need approval
+*Accepted, Build 004 (an interpretation of the spec; needs user confirmation, see P-7)*
+
+**Spec:** "Never overwrite pre-existing uncommitted changes." **Problem:** a literal ban would make
+Trace useless for the most common case, debugging code you're working on right now. **Decision:**
+files with uncommitted changes when the task starts may be changed only with explicit approval
+(even in `auto`), shown with a diff and a warning, and always backed up first. Without a terminal,
+such changes are denied. Commands can't change them either (ADR-033).
+
+### ADR-033: Write guard: denials and protection are binding for commands
+*Accepted, Build 004 (from a live finding)*
+
+**Context (found live).** After an edit to a protected file was denied, the model tried 15+ times
+to write the same file through `run_command("python -c ...")`, which is allowed in auto mode. The
+file survived only because the commands happened to be malformed.
+
+**Decision.** Every command runs inside `run_guarded`: guarded files (uncommitted user work, plus
+any file whose change was denied in this task) are backed up byte for byte, and the project is
+fingerprinted (size + mtime) before and after. A guarded file that changed is restored immediately;
+the result is an error marked as a violation; three violations or blocked commands stop the task
+with `SAFETY_VIOLATION`. Other files changed by commands are reported to the model, the terminal
+and the final report (they bypass checkpoints; git can restore them).
+
+**Verified live:** the next bypass attempt was reverted, and the model finished honestly.
+**Limits:** non-guarded files are detected by size + mtime only; changes outside the project
+directory are out of scope (commands run in the project; full sandboxing is P-9).
+
+### ADR-034: `Tool.assess()` before authorization
+*Accepted, Build 004*
+
+A tool's static permission is too coarse (`run_command("pytest")` is not `run_command("rm -rf")`).
+`assess(args, context)` returns the **effective** permission for these exact arguments, a reason
+that forces approval, a blocked verdict, a diff or command preview for the approval prompt, the
+paths it would change (they become guarded if denied), and a **certain-failure** short-circuit,
+so the user is never asked to approve an edit whose text isn't even in the file. Editing tools are
+only offered when a checkpoint store exists (`is_available`).
+
+### ADR-035: Robustness: approvals degrade to deny; internal errors never lose the task
+*Accepted, Build 004 (from a live finding)*
+
+**Context (found live).** Stdin looked like a terminal but was closed; `Prompt.ask` raised
+`EOFError`, which escaped the loop and left no history row. **Decision:** EOF in the approver means
+"deny this and all later requests"; non-interactive denials state their reason; any unexpected
+exception in the loop ends the task as `FAILED` / `INTERNAL_ERROR` with a traceback event, so the
+task is still saved, the trace still ends with `TASK_FINISHED`, and changed files remain undoable.
+
+### ADR-036: Context budget: elide oldest tool outputs
+*Accepted, Build 004 (basic; resolves P-5 for now)*
+
+Before each model call, if the conversation exceeds `max_context_chars` (160k), the oldest tool
+outputs are replaced by their first line plus a note ("re-run the tool if you need it"). The 6 most
+recent outputs are always kept, and the model's own messages are never altered. Deterministic,
+cheap and testable. **Not yet:** token-accurate budgeting or summarization.
+
+---
+
 ## Rejected alternatives (summary)
 
 | Alternative | Rejected in | Reason |
@@ -383,6 +495,10 @@ reliable improvement. That needs the Phase 5 benchmark (many runs per configurat
 | shipping write tools in Phase 2 | ADR-013 | no checkpoints, git safety or command screening yet |
 | embeddings / vector index for context | ADR-015 | heavy, non-deterministic, unnecessary at this scale |
 | auto-loading `.env` | P-3 | it would ingest the debugged project's secrets |
+| running commands through a shell | ADR-031 | injection risk; can't classify what will run |
+| literal "never modify uncommitted files" | ADR-032 | would block the most common debugging case |
+| trusting the agent's own test choice for "fixed" | ADR-029 | it can verify a narrow or irrelevant subset |
+| protecting files only inside the editing tools | ADR-033 | commands can write files (proven live) |
 
 ---
 
@@ -400,7 +516,8 @@ Spec (human_feedback_protocol): *"Maintain a record of accepted and rejected fee
 | F-6 | 2026-11-25 | "Push to github.com/samagragune/trace" | **Accepted** | initial commit `18c4240`; Phase 3 `af0f4aa` pushed on request |
 | F-7 | 2026-11-25 | "Do not co-author it in commits" | **Accepted** | process rule: commits carry no co-author or attribution trailers |
 | F-8 | 2026-11-25 | "Move onto next phase" (after Build 002) | **Accepted** | Build 003 = Phase 3, the roadmap order (Phase 4 was recommended; the user chose the next phase) |
-| F-9 | 2026-11-25 | "Update architecture and decision md files with every phase and build detail" | **Accepted** | this revision; ADRs 019–028 written retroactively |
+| F-9 | 2026-11-25 | "Update architecture and decision md files with every phase and build detail" | **Accepted** | ADRs 019–028 written retroactively; docs kept current per build since |
+| F-10 | 2026-11-26 | "Move on to build phase 4, update the readme and push to git; test it out; plan the phase where the agent can actually change code" | **Accepted** | Build 004 is that phase; README rewritten; live-tested on Gemini; pushed |
 
 ---
 
@@ -422,6 +539,9 @@ Spec (human_feedback_protocol): *"Maintain a record of accepted and rejected fee
 | P-1 | Rename for PyPI? `trace-agent` may be taken; a `trace` binary exists in some Linux distributions (bcc, `perf trace`) | check name availability before Phase 6 | Build 001 |
 | P-2 | ~~Interactive approvals vs `AWAITING_APPROVAL`~~ | **Resolved** by ADR-012 | Build 001 |
 | P-3 | Load a `.env` file? | no automatic loading; optionally add an explicit `--env-file PATH` | Build 002 |
-| P-4 | `[agent] max_retry_attempts` is accepted but unused | remove it, or wire it to Phase 4 tool retries; don't leave a no-op setting | Build 003 review |
-| P-5 | Context-window management priority | do it before or with Phase 4: editing adds diffs and test output, which will hit limits sooner | Build 003 review |
-| P-6 | Next phase: 4 (edit and verify) or 5 (benchmark) | Phase 4: it is the step that turns a diagnosis into a verified fix | Build 003 |
+| P-4 | ~~`[agent] max_retry_attempts` is accepted but unused~~ | **Resolved** (Build 004): it now limits failed fix attempts | Build 003 review |
+| P-5 | ~~Context-window management~~ | **Resolved (basic)** by ADR-036; token-accurate budgeting later | Build 003 review |
+| P-6 | ~~Next phase: 4 or 5~~ | **Resolved**: Phase 4 built (Build 004) | Build 003 |
+| P-7 | Confirm the interpretation of "never overwrite uncommitted changes" (ADR-032) | keep it: approval + backup, rather than an outright ban | Build 004 |
+| P-8 | Next: Phase 5 (benchmark harness) or finish Phase 1 (keyring, `trace init`) first | Phase 5: efficiency and reliability claims now need numbers, not anecdotes | Build 004 |
+| P-9 | Sandboxing commands (filesystem outside the project, network) | Phase 6 topic; the write guard only covers the project directory | Build 004 |

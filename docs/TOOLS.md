@@ -49,13 +49,70 @@ All tool output is redacted for credential patterns before it reaches the model 
 Orchestrator built-ins (names reserved; they act on task state, not on the machine):
 `record_hypothesis` (`statement?, status, evidence[], id?`) and `finish_task` (see AGENT_LOOP.md).
 
+## Tools that change things (Build 004)
+
+| Tool | Permission (effective, from `assess`) | Inputs | Behavior |
+|---|---|---|---|
+| `edit_file` | WRITE | `path, expected_original, replacement, replace_all=false` | exact replace; must match once (or `replace_all`); closest-match hint on a miss; CRLF/BOM/trailing newline preserved; returns a diff |
+| `apply_patch` | WRITE (DESTRUCTIVE if it deletes a file) | `patch` (unified diff) | multi-file, all-or-nothing; line numbers are hints, context must match (exactly, then ignoring trailing whitespace); `/dev/null` creates/deletes |
+| `create_file` | WRITE | `path, content` | fails if the file exists |
+| `delete_file` | DESTRUCTIVE | `path` | always asks; backed up first |
+| `run_command` | from `classify()`: READ / EXECUTE / DESTRUCTIVE / blocked | `command, working_directory=".", timeout_seconds?` | no shell; timeout + process-tree kill; runs inside the write guard; reports files it changed |
+| `run_tests` | same as `run_command` (the detected test command is READ) | `test_command?, working_directory, timeout_seconds?` | default = detected/configured test command; summary for pytest, jest, vitest, mocha, unittest, cargo, go, maven; produces **verification evidence** |
+| `inspect_git` | READ | `operation (status, diff, diff_staged, log, show, blame), path?, revision?, max_count, start_line?, end_line?` | read-only git; offered only inside a repository |
+
+Shared rules for the editing tools:
+- **Only offered when a checkpoint store exists**: no change Trace couldn't undo.
+- Never `.git/` internals or sensitive files; project boundary enforced.
+- Files with uncommitted user changes, or whose change was already denied, force an approval prompt
+  (even in auto mode).
+- Writes are planned first, backed up, written atomically and read back to verify.
+- A call that is certain to fail (text not found, ambiguous match) is reported to the model without
+  asking the user to approve it.
+
+## Tools that change things (Build 004)
+
+| Tool | Permission (effective, from `assess`) | Inputs | Behavior |
+|---|---|---|---|
+| `edit_file` | WRITE | `path, expected_original, replacement, replace_all=false` | exact replace; must match once (or `replace_all`); closest-match hint on a miss; CRLF/BOM/trailing newline preserved; returns a diff |
+| `apply_patch` | WRITE (DESTRUCTIVE if it deletes a file) | `patch` (unified diff) | multi-file, all-or-nothing; line numbers are hints, context must match (exactly, then ignoring trailing whitespace); `/dev/null` creates/deletes |
+| `create_file` | WRITE | `path, content` | fails if the file exists |
+| `delete_file` | DESTRUCTIVE | `path` | always asks; backed up first |
+| `run_command` | from `classify()`: READ / EXECUTE / DESTRUCTIVE / blocked | `command, working_directory=".", timeout_seconds?` | no shell; timeout + process-tree kill; runs inside the write guard; reports files it changed |
+| `run_tests` | same as `run_command` (the detected test command is READ) | `test_command?, working_directory, timeout_seconds?` | default = detected/configured test command; summary for pytest, jest, vitest, mocha, unittest, cargo, go, maven; produces **verification evidence** |
+| `inspect_git` | READ | `operation (status, diff, diff_staged, log, show, blame), path?, revision?, max_count, start_line?, end_line?` | read-only git; offered only inside a repository |
+
+Shared rules for the editing tools:
+- **Only offered when a checkpoint store exists**: no change Trace couldn't undo.
+- Never `.git/` internals or sensitive files; project boundary enforced.
+- Files with uncommitted user changes, or whose change was already denied, force an approval prompt
+  (even in auto mode).
+- Writes are planned first, backed up, written atomically and read back to verify.
+- A call that is certain to fail (text not found, ambiguous match) is reported to the model without
+  asking the user to approve it.
+
+## Tools that change things (Build 004)
+
+| Tool | Permission (effective, from `assess`) | Inputs | Behavior |
+|---|---|---|---|
+| `edit_file` | WRITE | `path, expected_original, replacement, replace_all=false` | exact replace; must match once (or `replace_all`); closest-match hint on a miss; CRLF/BOM/trailing newline preserved; returns a diff |
+| `apply_patch` | WRITE (DESTRUCTIVE if it deletes a file) | `patch` (unified diff) | multi-file, all-or-nothing; line numbers are hints, context must match (exactly, then ignoring trailing whitespace); `/dev/null` creates/deletes |
+| `create_file` | WRITE | `path, content` | fails if the file exists |
+| `delete_file` | DESTRUCTIVE | `path` | always asks; backed up first |
+| `run_command` | from `classify()`: READ / EXECUTE / DESTRUCTIVE / blocked | `command, working_directory=".", timeout_seconds?` | no shell; timeout + process-tree kill; runs inside the write guard; reports files it changed |
+| `run_tests` | same as `run_command` (the detected test command is READ) | `test_command?, working_directory, timeout_seconds?` | default = detected/configured test command; summary for pytest, jest, vitest, mocha, unittest, cargo, go, maven; produces **verification evidence** |
+| `inspect_git` | READ | `operation (status, diff, diff_staged, log, show, blame), path?, revision?, max_count, start_line?, end_line?` | read-only git; offered only inside a repository |
+
+Shared rules for the editing tools:
+- **Only offered when a checkpoint store exists**: no change Trace couldn't undo.
+- Never `.git/` internals or sensitive files; project boundary enforced.
+- Files with uncommitted user changes, or whose change was already denied, force an approval prompt
+  (even in auto mode).
+- Writes are planned first, backed up, written atomically and read back to verify.
+- A call that is certain to fail (text not found, ambiguous match) is reported to the model without
+  asking the user to approve it.
+
 ## Planned tools
 
-| Tool | Permission | Phase | Notes |
-|---|---|---|---|
-| `inspect_git` | READ | 4 | hidden if git is unavailable |
-| `create_file` | WRITE | 4 | |
-| `edit_file` | WRITE | 4 | `expected_original` must match; checkpoint first |
-| `run_tests` | EXECUTE | 4 | results feed `task.add_verification` |
-| `run_command` | EXECUTE | 4 | risk classifier may escalate to DESTRUCTIVE |
-| `delete_file` | DESTRUCTIVE | 4 | always asks, except in plan mode, where it is denied |
+All ten tools from the original specification are implemented. Candidates for later phases:
+a tool to create a debugging branch, and opt-in commits after approval (spec: git `future_features`).

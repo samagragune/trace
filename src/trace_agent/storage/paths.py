@@ -41,6 +41,11 @@ class TracePaths:
     def log_dir(self) -> Path:
         return self.home / "logs"
 
+    @property
+    def checkpoint_dir(self) -> Path:
+        """Per-task backups of files Trace changed (used by `trace undo`)."""
+        return self.cache_dir / "checkpoints"
+
     def ensure(self) -> None:
         for directory in (self.home, self.cache_dir, self.log_dir):
             directory.mkdir(parents=True, exist_ok=True)

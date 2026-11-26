@@ -183,3 +183,21 @@ def test_corrupt_config_reported_cleanly():
     result = runner.invoke(app, ["status"])
     assert result.exit_code == 1
     assert "not valid TOML" in result.output
+
+
+def test_undo_restores_and_respects_later_user_edits(tmp_path):
+    from trace_agent.safety.checkpoints import CheckpointStore
+
+    proj = tmp_path / "p"
+    proj.mkdir()
+    (proj / "a.py").write_text("original\n")
+    store = CheckpointStore(TracePaths.from_env().checkpoint_dir, "abc123def456", proj)
+    store.before_change("a.py")
+    (proj / "a.py").write_text("trace edit\n")
+    store.after_change("a.py")
+
+    assert runner.invoke(app, ["undo", "zzz"]).exit_code == 1  # unknown id
+    result = runner.invoke(app, ["undo"])  # default: most recent task with changes
+    assert result.exit_code == 0 and "restored" in result.output
+    assert (proj / "a.py").read_text() == "original\n"
+    assert "nothing to undo" in runner.invoke(app, ["undo", "abc123"]).output
